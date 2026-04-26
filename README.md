@@ -23,7 +23,7 @@ All Python commands must use the project virtual environment:
 ```
 
 If `.venv/bin/python` does not exist, create the virtual environment first with
-the project-approved Python 3.11 setup command.
+the project-approved Python 3.11+ setup command.
 
 ## Validation
 
