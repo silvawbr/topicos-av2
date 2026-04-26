@@ -96,16 +96,21 @@ Use deterministic validation whenever possible.
 Common gates:
 
 ```bash
-.venv/bin/python -m pytest
-.venv/bin/python -m atividade_2.cli --help
+make test
 ```
 
-For database changes, prefer project-specific commands such as:
+For local database setup, backup, or restore changes, prefer project-specific commands such as:
 
 ```bash
-psql "$DATABASE_URL" -f path/to/schema.sql
-psql "$DATABASE_URL" -f path/to/validation.sql
+make db-up
+make db-migrate-or-create
+make db-restore-validate
+make db-backup
+make db-status
+make db-down
 ```
+
+Use direct `psql` commands only when a task specifically requires ad hoc SQL validation beyond the existing scripts.
 
 For repository instruction changes:
 
