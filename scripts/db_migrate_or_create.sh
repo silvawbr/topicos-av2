@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BACKUP_FILE="${1:-backup_atividade_2.sql}"
+
+if [ ! -f ".env" ]; then
+  echo ".env was not found. Run make db-up first." >&2
+  exit 1
+fi
+
+if [ ! -f "$BACKUP_FILE" ]; then
+  echo "Backup file not found: $BACKUP_FILE" >&2
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1091
+source ".env"
+set +a
+
+POSTGRES_CONTAINER_NAME="${POSTGRES_CONTAINER_NAME:-topicos-av2-postgres}"
+POSTGRES_USER="${POSTGRES_USER:-postgres}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}"
+POSTGRES_DB="${POSTGRES_DB:-app_dev}"
+
+if ! docker ps --format '{{.Names}}' | grep -Fx "$POSTGRES_CONTAINER_NAME" >/dev/null; then
+  echo "PostgreSQL container is not running: $POSTGRES_CONTAINER_NAME" >&2
+  exit 1
+fi
+
+table_count="$(
+  docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" "$POSTGRES_CONTAINER_NAME" \
+    psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+    "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE';"
+)"
+
+if [ "$table_count" != "0" ]; then
+  echo "Database $POSTGRES_DB already has $table_count public table(s). Restore skipped."
+  exit 0
+fi
+
+docker exec -i \
+  -e PGPASSWORD="$POSTGRES_PASSWORD" \
+  "$POSTGRES_CONTAINER_NAME" \
+  psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" < "$BACKUP_FILE"
+
+echo "Restored $BACKUP_FILE into $POSTGRES_DB."
