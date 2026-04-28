@@ -3,7 +3,7 @@ PYTHON := $(VENV)/bin/python
 PIP := $(PYTHON) -m pip
 PYTEST := $(PYTHON) -m pytest
 
-.PHONY: venv install test db-up db-down db-logs db-psql db-status db-reset db-migrate-or-create db-restore-validate db-backup clean
+.PHONY: venv install test db-up db-down db-logs db-psql db-status db-reset db-migrate-or-create db-restore-validate db-backup db-dump-structure db-dump-questions db-dump-responses db-dump-root-backup db-dump-all clean
 
 venv:
 	@if [ ! -d "$(VENV)" ]; then \
@@ -47,6 +47,20 @@ db-restore-validate:
 
 db-backup:
 	./scripts/db_backup.sh
+
+db-dump-structure:
+	./scripts/db_dump_structure.sh
+
+db-dump-questions:
+	./scripts/db_dump_questions.sh
+
+db-dump-responses:
+	./scripts/db_dump_responses.sh
+
+db-dump-root-backup:
+	./scripts/db_dump_root_backup.sh
+
+db-dump-all: db-dump-structure db-dump-questions db-dump-responses db-dump-root-backup
 
 clean:
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
