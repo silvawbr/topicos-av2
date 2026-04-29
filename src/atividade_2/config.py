@@ -1,0 +1,265 @@
+"""Configuration loading and runtime judge-mode resolution."""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from pathlib import Path
+
+from .contracts import JudgeExecutionStrategy, JudgeSettings, PanelMode, RuntimeJudgeConfig
+from .model_aliases import resolve_judge_model
+
+DEFAULT_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/app_dev"
+SUPPORTED_PANEL_MODES: set[str] = {"single", "primary_only", "2plus1"}
+SUPPORTED_PROVIDERS: set[str] = {"remote_http"}
+SUPPORTED_EXECUTION_STRATEGIES: set[str] = {"sequential", "parallel"}
+
+
+class ConfigurationError(ValueError):
+    """Raised when runtime configuration is missing or invalid."""
+
+
+def parse_env_file(path: str | Path) -> dict[str, str]:
+    """Parse a small dotenv file without expanding variables or commands."""
+    env_path = Path(path)
+    if not env_path.exists():
+        return {}
+
+    values: dict[str, str] = {}
+    for line_number, raw_line in enumerate(env_path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise ConfigurationError(f"Invalid .env line {line_number}: expected KEY=value.")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ConfigurationError(f"Invalid .env line {line_number}: key cannot be empty.")
+        values[key] = _strip_quotes(value.strip())
+    return values
+
+
+def load_env(dotenv_path: str | Path | None = ".env", env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Load dotenv values, then overlay process environment values."""
+    values: dict[str, str] = {}
+    if dotenv_path is not None:
+        values.update(parse_env_file(dotenv_path))
+    values.update(dict(os.environ if env is None else env))
+    return values
+
+
+def load_settings(dotenv_path: str | Path | None = ".env", env: Mapping[str, str] | None = None) -> JudgeSettings:
+    """Load and validate static settings before CLI overrides."""
+    values = load_env(dotenv_path=dotenv_path, env=env)
+    provider = _get_choice(values, "JUDGE_PROVIDER", "remote_http", SUPPORTED_PROVIDERS)
+    panel_mode = _get_choice(values, "JUDGE_PANEL_MODE", "2plus1", SUPPORTED_PANEL_MODES)
+    execution_strategy = _get_choice(
+        values,
+        "JUDGE_EXECUTION_STRATEGY",
+        "sequential",
+        SUPPORTED_EXECUTION_STRATEGIES,
+    )
+
+    return JudgeSettings(
+        database_url=values.get("DATABASE_URL", DEFAULT_DATABASE_URL),
+        judge_provider=provider,  # type: ignore[arg-type]
+        remote_judge_base_url=_empty_to_none(values.get("REMOTE_JUDGE_BASE_URL")),
+        remote_judge_api_key=_empty_to_none(values.get("REMOTE_JUDGE_API_KEY")),
+        judge_panel_mode=panel_mode,  # type: ignore[arg-type]
+        remote_judge_default_model=_empty_to_none(values.get("REMOTE_JUDGE_MODEL")),
+        remote_primary_judge_panel=_parse_panel(values.get("REMOTE_PRIMARY_JUDGE_PANEL", "")),
+        remote_arbiter_judge_model=_empty_to_none(values.get("REMOTE_ARBITER_JUDGE_MODEL")),
+        judge_arbitration_min_delta=_parse_int(values, "JUDGE_ARBITRATION_MIN_DELTA", 2, minimum=0),
+        judge_always_run_arbiter=_parse_bool(values, "JUDGE_ALWAYS_RUN_ARBITER", False),
+        remote_judge_timeout_seconds=_parse_int(values, "REMOTE_JUDGE_TIMEOUT_SECONDS", 180, minimum=1),
+        remote_judge_temperature=_parse_float(values, "REMOTE_JUDGE_TEMPERATURE", 0.0, minimum=0.0),
+        remote_judge_max_tokens=_parse_int(values, "REMOTE_JUDGE_MAX_TOKENS", 1200, minimum=1),
+        remote_judge_top_p=_parse_float(values, "REMOTE_JUDGE_TOP_P", 1.0, minimum=0.0),
+        remote_judge_openai_compatible=_parse_bool(values, "REMOTE_JUDGE_OPENAI_COMPATIBLE", True),
+        judge_save_raw_response=_parse_bool(values, "JUDGE_SAVE_RAW_RESPONSE", True),
+        judge_execution_strategy=execution_strategy,  # type: ignore[arg-type]
+    )
+
+
+def resolve_runtime_config(
+    settings: JudgeSettings,
+    *,
+    judge_provider: str | None = None,
+    panel_mode: str | None = None,
+    judge_model: str | None = None,
+    primary_judge_panel: str | None = None,
+    arbiter_judge_model: str | None = None,
+    always_run_arbiter: bool = False,
+    execution_strategy: str | None = None,
+) -> RuntimeJudgeConfig:
+    """Resolve effective judge mode/model/panel using CLI-over-env precedence."""
+    provider = judge_provider or settings.judge_provider
+    if provider not in SUPPORTED_PROVIDERS:
+        raise ConfigurationError(f"Unsupported judge provider: {provider}. Supported values: remote_http.")
+
+    effective_mode = _resolve_panel_mode(settings, panel_mode, judge_model)
+    effective_strategy = _resolve_execution_strategy(settings, execution_strategy)
+    _validate_remote_settings(settings)
+
+    if effective_mode == "single":
+        model_value = judge_model or settings.remote_judge_default_model
+        if not model_value:
+            raise ConfigurationError(
+                "Single judge mode requires --judge-model or REMOTE_JUDGE_MODEL."
+            )
+        single_judge = resolve_judge_model(model_value)
+        return RuntimeJudgeConfig(
+            provider=provider,  # type: ignore[arg-type]
+            panel_mode="single",
+            single_judge=single_judge,
+            primary_panel=(),
+            arbiter=None,
+            arbitration_min_delta=settings.judge_arbitration_min_delta,
+            always_run_arbiter=False,
+            execution_strategy=effective_strategy,
+            settings=settings,
+            model_source="CLI argument --judge-model" if judge_model else ".env REMOTE_JUDGE_MODEL",
+        )
+
+    panel_values = _parse_panel(primary_judge_panel) if primary_judge_panel else settings.remote_primary_judge_panel
+    if not panel_values:
+        raise ConfigurationError(
+            f"{effective_mode} mode requires --primary-judge-panel or REMOTE_PRIMARY_JUDGE_PANEL."
+        )
+    if effective_mode == "2plus1" and len(panel_values) != 2:
+        raise ConfigurationError("2plus1 mode requires exactly two primary judge models.")
+
+    primary_panel = tuple(resolve_judge_model(value) for value in panel_values)
+    arbiter = None
+    if effective_mode == "2plus1":
+        arbiter_value = arbiter_judge_model or settings.remote_arbiter_judge_model
+        if not arbiter_value:
+            raise ConfigurationError(
+                "2plus1 mode requires --arbiter-judge-model or REMOTE_ARBITER_JUDGE_MODEL."
+            )
+        arbiter = resolve_judge_model(arbiter_value)
+
+    return RuntimeJudgeConfig(
+        provider=provider,  # type: ignore[arg-type]
+        panel_mode=effective_mode,
+        single_judge=None,
+        primary_panel=primary_panel,
+        arbiter=arbiter,
+        arbitration_min_delta=settings.judge_arbitration_min_delta,
+        always_run_arbiter=always_run_arbiter or settings.judge_always_run_arbiter,
+        execution_strategy=effective_strategy,
+        settings=settings,
+        model_source=_panel_model_source(primary_judge_panel, arbiter_judge_model),
+    )
+
+
+def _resolve_panel_mode(settings: JudgeSettings, panel_mode: str | None, judge_model: str | None) -> PanelMode:
+    if judge_model and panel_mode in {None, "single"}:
+        return "single"
+    effective_mode = panel_mode or settings.judge_panel_mode
+    if effective_mode not in SUPPORTED_PANEL_MODES:
+        raise ConfigurationError(
+            f"Unsupported panel mode: {effective_mode}. Supported values: single, primary_only, 2plus1."
+        )
+    if judge_model and effective_mode != "single":
+        raise ConfigurationError("--judge-model is only valid in single mode.")
+    return effective_mode  # type: ignore[return-value]
+
+
+def _resolve_execution_strategy(
+    settings: JudgeSettings,
+    execution_strategy: str | None,
+) -> JudgeExecutionStrategy:
+    effective_strategy = execution_strategy or settings.judge_execution_strategy
+    if effective_strategy not in SUPPORTED_EXECUTION_STRATEGIES:
+        raise ConfigurationError(
+            "Unsupported judge execution strategy: "
+            f"{effective_strategy}. Supported values: sequential, parallel."
+        )
+    return effective_strategy  # type: ignore[return-value]
+
+
+def _validate_remote_settings(settings: JudgeSettings) -> None:
+    if settings.judge_provider != "remote_http":
+        raise ConfigurationError(f"Unsupported judge provider: {settings.judge_provider}.")
+    if not settings.remote_judge_base_url:
+        raise ConfigurationError("REMOTE_JUDGE_BASE_URL is required for JUDGE_PROVIDER=remote_http.")
+    if not settings.remote_judge_base_url.startswith(("http://", "https://")):
+        raise ConfigurationError("REMOTE_JUDGE_BASE_URL must start with http:// or https://.")
+    if not settings.remote_judge_api_key:
+        raise ConfigurationError("REMOTE_JUDGE_API_KEY is required for JUDGE_PROVIDER=remote_http.")
+
+
+def _panel_model_source(primary_judge_panel: str | None, arbiter_judge_model: str | None) -> str:
+    sources: list[str] = []
+    sources.append("CLI --primary-judge-panel" if primary_judge_panel else ".env REMOTE_PRIMARY_JUDGE_PANEL")
+    sources.append("CLI --arbiter-judge-model" if arbiter_judge_model else ".env REMOTE_ARBITER_JUDGE_MODEL")
+    return " / ".join(sources)
+
+
+def _parse_panel(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    panel = tuple(item.strip() for item in value.split(",") if item.strip())
+    if len(set(panel)) != len(panel):
+        raise ConfigurationError("Judge panel cannot contain duplicate models.")
+    return panel
+
+
+def _parse_bool(values: Mapping[str, str], key: str, default: bool) -> bool:
+    raw_value = values.get(key)
+    if raw_value is None or raw_value == "":
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{key} must be a boolean value.")
+
+
+def _parse_int(values: Mapping[str, str], key: str, default: int, *, minimum: int) -> int:
+    raw_value = values.get(key)
+    if raw_value is None or raw_value == "":
+        return default
+    try:
+        parsed = int(raw_value)
+    except ValueError as error:
+        raise ConfigurationError(f"{key} must be an integer.") from error
+    if parsed < minimum:
+        raise ConfigurationError(f"{key} must be >= {minimum}.")
+    return parsed
+
+
+def _parse_float(values: Mapping[str, str], key: str, default: float, *, minimum: float) -> float:
+    raw_value = values.get(key)
+    if raw_value is None or raw_value == "":
+        return default
+    try:
+        parsed = float(raw_value)
+    except ValueError as error:
+        raise ConfigurationError(f"{key} must be a number.") from error
+    if parsed < minimum:
+        raise ConfigurationError(f"{key} must be >= {minimum}.")
+    return parsed
+
+
+def _get_choice(values: Mapping[str, str], key: str, default: str, choices: set[str]) -> str:
+    value = values.get(key, default)
+    if value not in choices:
+        raise ConfigurationError(f"{key} must be one of: {', '.join(sorted(choices))}.")
+    return value
+
+
+def _strip_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _empty_to_none(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None

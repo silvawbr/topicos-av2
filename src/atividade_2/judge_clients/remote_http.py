@@ -1,0 +1,187 @@
+"""Generic remote HTTP judge client."""
+
+from __future__ import annotations
+
+import json
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+from atividade_2.contracts import JudgeRawResponse, JudgeSettings
+
+
+class RemoteJudgeError(RuntimeError):
+    """Raised for remote judge transport or response errors."""
+
+
+class HttpTransport(Protocol):
+    """Small transport seam for offline tests."""
+
+    def post(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout: int,
+    ) -> tuple[int, dict[str, Any]]:
+        """POST JSON and return ``(status_code, parsed_json)``."""
+
+
+@dataclass(frozen=True)
+class UrllibHttpTransport:
+    """stdlib urllib transport implementation."""
+
+    max_response_bytes: int = 1_000_000
+
+    def post(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout: int,
+    ) -> tuple[int, dict[str, Any]]:
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                status_code = response.getcode()
+                raw_body = response.read(self.max_response_bytes + 1)
+        except urllib.error.HTTPError as error:
+            raw_body = error.read(self.max_response_bytes + 1)
+            message = _safe_response_message(raw_body)
+            raise RemoteJudgeError(f"Remote judge returned HTTP {error.code}: {message}") from error
+        except urllib.error.URLError as error:
+            raise RemoteJudgeError(f"Remote judge request failed: {error.reason}") from error
+        except TimeoutError as error:
+            raise RemoteJudgeError("Remote judge request timed out.") from error
+
+        if len(raw_body) > self.max_response_bytes:
+            raise RemoteJudgeError("Remote judge response exceeded the maximum allowed size.")
+        return status_code, _parse_json_body(raw_body)
+
+
+@dataclass
+class RemoteHttpJudgeClient:
+    """Remote HTTP judge client with OpenAI-compatible request support."""
+
+    settings: JudgeSettings
+    transport: HttpTransport | None = None
+
+    def judge(self, prompt: str, model: str) -> JudgeRawResponse:
+        if not self.settings.remote_judge_base_url:
+            raise RemoteJudgeError("REMOTE_JUDGE_BASE_URL is required.")
+        if not self.settings.remote_judge_api_key:
+            raise RemoteJudgeError("REMOTE_JUDGE_API_KEY is required.")
+
+        transport = self.transport or UrllibHttpTransport()
+        url = _resolve_url(
+            self.settings.remote_judge_base_url,
+            openai_compatible=self.settings.remote_judge_openai_compatible,
+        )
+        payload = self._build_payload(prompt=prompt, model=model)
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.settings.remote_judge_api_key}",
+            "User-Agent": "atividade-2-judge/0.1",
+        }
+
+        started = time.monotonic()
+        status_code, raw_response = transport.post(
+            url,
+            headers=headers,
+            payload=payload,
+            timeout=self.settings.remote_judge_timeout_seconds,
+        )
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if status_code < 200 or status_code >= 300:
+            raise RemoteJudgeError(f"Remote judge returned HTTP {status_code}.")
+
+        text = _extract_response_text(raw_response)
+        return JudgeRawResponse(
+            text=text,
+            provider="remote_http",
+            model=model,
+            latency_ms=latency_ms,
+            status_code=status_code,
+            raw_response=raw_response if self.settings.judge_save_raw_response else None,
+        )
+
+    def _build_payload(self, *, prompt: str, model: str) -> dict[str, Any]:
+        if self.settings.remote_judge_openai_compatible:
+            return {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Você é um avaliador jurídico. Responda somente JSON válido.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": self.settings.remote_judge_temperature,
+                "max_tokens": self.settings.remote_judge_max_tokens,
+                "top_p": self.settings.remote_judge_top_p,
+            }
+        return {
+            "model": model,
+            "prompt": prompt,
+            "temperature": self.settings.remote_judge_temperature,
+            "max_tokens": self.settings.remote_judge_max_tokens,
+            "top_p": self.settings.remote_judge_top_p,
+        }
+
+
+def _resolve_url(base_url: str, *, openai_compatible: bool) -> str:
+    stripped = base_url.rstrip("/")
+    if not openai_compatible:
+        return stripped
+    if stripped.endswith("/chat/completions"):
+        return stripped
+    return f"{stripped}/chat/completions"
+
+
+def _extract_response_text(raw_response: dict[str, Any]) -> str:
+    choices = raw_response.get("choices")
+    if isinstance(choices, list) and choices:
+        first_choice = choices[0]
+        if isinstance(first_choice, dict):
+            message = first_choice.get("message")
+            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                return message["content"]
+            if isinstance(first_choice.get("text"), str):
+                return first_choice["text"]
+
+    for key in ("text", "output", "response"):
+        value = raw_response.get(key)
+        if isinstance(value, str):
+            return value
+
+    raise RemoteJudgeError("Remote judge response did not contain model text.")
+
+
+def _parse_json_body(raw_body: bytes) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw_body.decode("utf-8"))
+    except json.JSONDecodeError as error:
+        raise RemoteJudgeError("Remote judge returned invalid JSON.") from error
+    if not isinstance(parsed, dict):
+        raise RemoteJudgeError("Remote judge JSON response must be an object.")
+    return parsed
+
+
+def _safe_response_message(raw_body: bytes) -> str:
+    try:
+        parsed = json.loads(raw_body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return "<non-json response>"
+    if isinstance(parsed, dict):
+        for key in ("error", "message", "detail"):
+            value = parsed.get(key)
+            if isinstance(value, str):
+                return value[:300]
+            if isinstance(value, dict) and isinstance(value.get("message"), str):
+                return value["message"][:300]
+    return "<response omitted>"
