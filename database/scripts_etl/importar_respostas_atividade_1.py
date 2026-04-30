@@ -66,9 +66,63 @@ def connect_db():
     )
 
 
+def maybe_fix_mojibake(value):
+    value = value or ""
+    if not isinstance(value, str):
+        return value
+
+    suspicious_tokens = ("Ã", "Â", "â€™", "â€œ", "â€", "ï»¿")
+    if not any(token in value for token in suspicious_tokens):
+        return value
+
+    try:
+        repaired = value.encode("latin1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return value
+    return repaired
+
+
+def infer_source_slug(path):
+    stem = Path(path).stem
+    for prefix in ("respostas_objetivas_", "respostas_discursivas_"):
+        if stem.startswith(prefix):
+            return stem[len(prefix) :]
+    return stem
+
+
+def normalize_row(row, source_slug):
+    if "nome_modelo" in row:
+        return {
+            "nome_modelo": maybe_fix_mojibake((row.get("nome_modelo") or "").strip()),
+            "versao": maybe_fix_mojibake((row.get("versao") or "").strip()),
+            "parametro_precisao": maybe_fix_mojibake((row.get("parametro_precisao") or "").strip()),
+            "id_pergunta": maybe_fix_mojibake((row.get("id_pergunta") or "").strip()),
+            "texto_resposta": maybe_fix_mojibake(row.get("texto_resposta") or ""),
+            "tempo_inferencia_ms": row.get("tempo_inferencia_ms"),
+            "data_geracao": row.get("data_geracao"),
+        }
+
+    if "modelo" in row and "question_id" in row and "resposta_modelo" in row:
+        return {
+            "nome_modelo": maybe_fix_mojibake((row.get("modelo") or "").strip()),
+            "versao": "",
+            "parametro_precisao": f"src:{source_slug}",
+            "id_pergunta": maybe_fix_mojibake((row.get("question_id") or "").strip()),
+            "texto_resposta": maybe_fix_mojibake(row.get("resposta_modelo") or ""),
+            "tempo_inferencia_ms": None,
+            "data_geracao": None,
+        }
+
+    raise ValueError(
+        f"Formato de CSV nao suportado para a origem '{source_slug}'. "
+        f"Colunas encontradas: {sorted(row.keys())}"
+    )
+
+
 def read_csv(path):
     with open(path, encoding="utf-8-sig", newline="") as file:
-        return list(csv.DictReader(file))
+        source_slug = infer_source_slug(path)
+        return [normalize_row(row, source_slug) for row in csv.DictReader(file)]
 
 
 def read_csvs(paths):
@@ -104,7 +158,7 @@ def load_question_refs(cur, dataset_name):
         """
         SELECT
             p.id_pergunta,
-            COALESCE(p.metadados->>'question_id', '')
+            p.metadados
         FROM perguntas p
         JOIN datasets d ON d.id_dataset = p.id_dataset
         WHERE d.nome_dataset = %s;
@@ -115,11 +169,17 @@ def load_question_refs(cur, dataset_name):
     id_set = set()
     external_map = {}
     sequence_map = {}
-    for index, (id_pergunta, question_id) in enumerate(cur.fetchall(), start=1):
+    for index, (id_pergunta, metadados) in enumerate(cur.fetchall(), start=1):
         id_set.add(id_pergunta)
         sequence_map[index] = id_pergunta
-        if question_id:
-            external_map[question_id] = id_pergunta
+        metadados = metadados or {}
+        external_values = [
+            metadados.get("question_id"),
+            metadados.get("id"),
+        ]
+        for external_value in external_values:
+            if external_value:
+                external_map[str(external_value)] = id_pergunta
 
     return id_set, external_map, sequence_map
 
