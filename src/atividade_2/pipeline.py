@@ -32,12 +32,14 @@ class JudgePipeline:
         audit: NullAuditLogger | None = None,
         progress_callback: Callable[[BatchProgress], None] | None = None,
         evaluation_callback: Callable[[EvaluationProgress], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> None:
         self.repository = repository
         self.client = client
         self.audit = audit or NullAuditLogger()
         self.progress_callback = progress_callback
         self.evaluation_callback = evaluation_callback
+        self.should_stop = should_stop or (lambda: False)
 
     def run(
         self,
@@ -61,6 +63,17 @@ class JudgePipeline:
             )
 
         for index, answer in enumerate(answers, start=1):
+            if self.should_stop():
+                self.audit.event(
+                    AuditEvent(
+                        "pipeline_cancelled",
+                        (
+                            f"current={index - 1} total={total_answers} executed={executed} "
+                            f"skipped={skipped} arbiters={arbiters}"
+                        ),
+                    )
+                )
+                break
             self.audit.terminal_event(f"Running answer {answer.answer_id} ({answer.dataset_name})")
             self.audit.event(
                 AuditEvent(

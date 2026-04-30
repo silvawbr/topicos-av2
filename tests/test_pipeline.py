@@ -140,6 +140,47 @@ def test_pipeline_reports_batch_progress_after_each_answer() -> None:
     ]
 
 
+def test_pipeline_stops_between_answers_without_discarding_completed_records() -> None:
+    settings = load_settings(dotenv_path=None, env=BASE_ENV)
+    config = resolve_runtime_config(settings, panel_mode="single")
+    repo = InMemoryJudgeRepository()
+    client = FakeJudgeClient({"openai/gpt-oss-120b": 5})
+    audit = RecordingAudit()
+    progress_events: list[BatchProgress] = []
+    stop_after_first = False
+
+    def record_progress(progress: BatchProgress) -> None:
+        nonlocal stop_after_first
+        progress_events.append(progress)
+        stop_after_first = True
+
+    summary = JudgePipeline(
+        repo,
+        client,
+        audit=audit,
+        progress_callback=record_progress,
+        should_stop=lambda: stop_after_first,
+    ).run([answer_with_id(1), answer_with_id(2)], config)
+
+    assert summary.executed_evaluations == 1
+    assert [record.answer_id for record in repo.records] == [1]
+    assert client.calls == ["openai/gpt-oss-120b"]
+    assert progress_events == [
+        BatchProgress(
+            current=1,
+            total=2,
+            percent=50,
+            executed_evaluations=1,
+            skipped_evaluations=0,
+            arbiter_evaluations=0,
+        )
+    ]
+    assert (
+        "pipeline_cancelled",
+        "current=1 total=2 executed=1 skipped=0 arbiters=0",
+    ) in audit.events
+
+
 def test_pipeline_reports_evaluation_rows_for_web_table() -> None:
     settings = load_settings(dotenv_path=None, env=BASE_ENV)
     config = resolve_runtime_config(settings, panel_mode="single")

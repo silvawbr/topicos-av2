@@ -176,6 +176,7 @@ class RunJudgeService:
         progress_callback: Callable[[BatchProgress], None] | None = None,
         eligibility_callback: Callable[[EligibilitySummary], None] | None = None,
         evaluation_callback: Callable[[EvaluationProgress], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> RunJudgeResult:
         """Run or dry-run the judge pipeline."""
         audit_path = _resolve_audit_path(request.audit_log)
@@ -288,12 +289,14 @@ class RunJudgeService:
                     "Running judge pipeline",
                     detail=f"answers={len(answers)} mode={runtime_config.panel_mode}",
                 ):
+                    stop_requested = should_stop or (lambda: False)
                     summary = JudgePipeline(
                         repository,
                         client,
                         audit=audit,
                         progress_callback=report_progress,
                         evaluation_callback=evaluation_callback,
+                        should_stop=stop_requested,
                     ).run(answers, runtime_config)
                 eligibility = repository.summarize_eligibility(
                     dataset=request.dataset,

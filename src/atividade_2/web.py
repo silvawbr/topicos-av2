@@ -25,7 +25,7 @@ from .parser import JudgeParseError
 from .run_judge_service import RunJudgeRequest, RunJudgeResult, RunJudgeService
 
 
-RunStatus = Literal["queued", "running", "completed", "failed"]
+RunStatus = Literal["queued", "running", "cancelling", "completed", "failed", "cancelled"]
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 AUDIT_TIMESTAMP_PATTERN = re.compile(r"^([^|]+)\s+\|\s+([^|]+)(?:\s+\|\s+(.*))?$")
 AUDIT_KEY_VALUE_PATTERN = re.compile(r"([A-Za-z_]+)=([^ ]+)")
@@ -95,6 +95,8 @@ class JobState:
     command_preview: str | None = None
     eligibility: EligibilitySummary | None = None
     evaluation_events: list[EvaluationProgress] = field(default_factory=list)
+    cancel_requested: bool = False
+    cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
 @dataclass(frozen=True)
@@ -147,9 +149,26 @@ class JobRegistry:
         with self._lock:
             return self._jobs.get(run_id)
 
+    def cancel(self, run_id: str) -> JobState | None:
+        with self._lock:
+            job = self._jobs.get(run_id)
+            if job is None:
+                return None
+            if job.status in {"queued", "running", "cancelling"}:
+                job.cancel_requested = True
+                job.cancel_event.set()
+                job.status = "cancelling"
+                return job
+            return job
+
     def _run(self, run_id: str) -> None:
         with self._lock:
             job = self._jobs[run_id]
+            if job.cancel_requested:
+                job.status = "cancelled"
+                if self._active_run_id == run_id:
+                    self._active_run_id = None
+                return
             job.status = "running"
 
         def update_progress(progress: BatchProgress) -> None:
@@ -170,6 +189,7 @@ class JobRegistry:
                 progress_callback=update_progress,
                 eligibility_callback=update_eligibility,
                 evaluation_callback=update_evaluation,
+                should_stop=job.cancel_event.is_set,
             )
         except (ConfigurationError, RemoteJudgeError, JudgeParseError, RuntimeError, ValueError) as error:
             with self._lock:
@@ -179,7 +199,7 @@ class JobRegistry:
         else:
             with self._lock:
                 job = self._jobs[run_id]
-                job.status = "completed"
+                job.status = "cancelled" if job.cancel_requested else "completed"
                 job.result = result
                 job.audit_log = result.audit_log
                 job.command_preview = result.command_preview
@@ -228,6 +248,14 @@ def create_app(service: RunJudgeService | None = None, *, audit_dir: Path | str 
     def get_run(run_id: str, request: Request) -> dict:
         registry: JobRegistry = request.app.state.jobs
         job = registry.get(run_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Run not found.")
+        return _serialize_job(job)
+
+    @app.post("/api/runs/{run_id}/cancel", dependencies=[Depends(_require_csrf)])
+    def cancel_run(run_id: str, request: Request) -> dict:
+        registry: JobRegistry = request.app.state.jobs
+        job = registry.cancel(run_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Run not found.")
         return _serialize_job(job)
@@ -573,6 +601,12 @@ _INDEX_HTML = """
     .history-row:hover { background:#f7fbff; }
     .history-log { min-height:520px; max-height:calc(100vh - 260px); }
     .history-export-links { display:flex; gap:8px; white-space:nowrap; }
+    .audit-log-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:center; }
+    .audit-log-row a { overflow-wrap:anywhere; }
+    .audit-log-button { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:30px; padding:0 9px; border-color:var(--line); background:#fff; color:var(--accent); font-size:12px; white-space:nowrap; }
+    .audit-log-button-icon { font-size:15px; line-height:1; }
+    .audit-log-button:disabled { color:var(--muted); }
+    .audit-log-content { min-height:420px; max-height:calc(100vh - 210px); margin:0; overflow:auto; }
     .badge { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:2px 7px; font-size:12px; white-space:nowrap; }
     .badge.success { color:var(--ok); border-color:#b7dfc8; background:#f0fbf4; }
     .badge.failed { color:var(--bad); border-color:#f0b8b2; background:#fff5f5; }
@@ -706,8 +740,9 @@ _INDEX_HTML = """
         </div>
       </details>
       <div class="actions">
-        <button class="secondary" id="dry-run">Validar configuracao</button>
-        <button id="run">Executar</button>
+        <button class="secondary" id="dry-run" disabled>Validar configuracao</button>
+        <button class="secondary" id="stop-run" type="button" disabled>Parar</button>
+        <button id="run" disabled>Executar</button>
       </div>
     </aside>
     <section>
@@ -815,14 +850,44 @@ _INDEX_HTML = """
       <pre id="details-rationale"></pre>
     </div>
   </dialog>
+  <dialog id="audit-log-dialog">
+    <div class="dialog-head">
+      <strong>Live audit log</strong>
+      <button class="secondary" id="audit-log-close" type="button">Fechar</button>
+    </div>
+    <div class="dialog-body">
+      <pre id="audit-log-content" class="audit-log-content">Audit log nao selecionado.</pre>
+    </div>
+  </dialog>
   <script>
     let csrfToken = "";
     let pollTimer = null;
     let historyLoaded = false;
+    let currentAuditLogUrl = null;
+    let activeRunId = null;
 
     function value(id) { return document.getElementById(id).value; }
     function setText(id, text) { document.getElementById(id).textContent = text ?? "-"; }
     function display(value) { return value === null || value === undefined || value === "" ? "-" : value; }
+    function friendlyErrorMessage(message) {
+      const raw = String(message || "");
+      const normalized = raw.toLowerCase();
+      const mappings = [
+        ["REMOTE_JUDGE_BASE_URL is required", "Configure a URL do endpoint do juiz"],
+        ["REMOTE_JUDGE_API_KEY is required", "Configure a key local; não commitar"],
+        ["invalid JSON", "O modelo não respeitou o contrato de saída"],
+        ["model does not exist", "Modelo inválido ou sem acesso nesse provedor"],
+        ["HTTP 401", "key inválida ou sem permissão"],
+        ["HTTP 403", "key inválida ou sem permissão"],
+        ["HTTP 404", "base URL/modelo incorreto"]
+      ];
+      for (const [needle, friendly] of mappings) {
+        if (normalized.includes(needle.toLowerCase())) return friendly;
+      }
+      if (normalized.includes("timeout")) return "aumentar timeout ou reduzir batch";
+      return raw || "Erro desconhecido.";
+    }
+
     function formatDateTime(value) {
       if (!value) return "-";
       return new Date(value).toLocaleString();
@@ -831,17 +896,59 @@ _INDEX_HTML = """
     function renderAuditLog(data) {
       const cell = document.getElementById("audit-log");
       const path = data.audit_log || data.result?.audit_log || "-";
+      const auditLogUrl = data.audit_log_url;
+      currentAuditLogUrl = auditLogUrl || null;
       cell.textContent = "";
-      if (data.audit_log_url) {
+      if (auditLogUrl) {
+        const row = document.createElement("span");
+        row.className = "audit-log-row";
         const link = document.createElement("a");
-        link.href = data.audit_log_url;
+        link.href = auditLogUrl;
         link.target = "_blank";
         link.rel = "noopener";
         link.textContent = path;
-        cell.appendChild(link);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "audit-log-button";
+        button.title = "Abrir live audit log";
+        button.setAttribute("aria-label", "Abrir live audit log");
+        const icon = document.createElement("span");
+        icon.className = "audit-log-button-icon";
+        icon.setAttribute("aria-hidden", "true");
+        icon.textContent = "▤";
+        const label = document.createElement("span");
+        label.textContent = "Live log";
+        button.appendChild(icon);
+        button.appendChild(label);
+        button.onclick = openAuditLogDialog;
+        row.appendChild(link);
+        row.appendChild(button);
+        cell.appendChild(row);
+        if (document.getElementById("audit-log-dialog").open) loadCurrentAuditLog();
         return;
       }
       cell.textContent = path;
+    }
+
+    function openAuditLogDialog() {
+      document.getElementById("audit-log-dialog").showModal();
+      loadCurrentAuditLog();
+    }
+
+    async function loadCurrentAuditLog() {
+      const liveLog = document.getElementById("audit-log-content");
+      if (!liveLog || !currentAuditLogUrl) return;
+      try {
+        const response = await fetch(currentAuditLogUrl);
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.detail || "Audit log ainda nao disponivel.");
+        }
+        liveLog.textContent = await response.text();
+        liveLog.scrollTop = liveLog.scrollHeight;
+      } catch (error) {
+        liveLog.textContent = friendlyErrorMessage(error.message);
+      }
     }
 
     function payload() {
@@ -876,13 +983,18 @@ _INDEX_HTML = """
       return raw === "" ? null : Number(raw);
     }
 
-    async function postJson(url, body) {
+    async function postJson(url, body, retryOnCsrf = true) {
+      if (!csrfToken) await loadConfig();
       const response = await fetch(url, {
         method: "POST",
         headers: {"content-type": "application/json", "x-csrf-token": csrfToken},
         body: JSON.stringify(body)
       });
       const data = await response.json();
+      if (response.status === 403 && data.detail === "Invalid CSRF token." && retryOnCsrf) {
+        await loadConfig();
+        return postJson(url, body, false);
+      }
       if (!response.ok) throw new Error(data.detail || "Request failed");
       return data;
     }
@@ -897,6 +1009,7 @@ _INDEX_HTML = """
       const status = data.status || "dry-run";
       setText("run-status", status);
       renderStatusIcon(status);
+      updateStopButton(data.run_id, status);
       renderAuditLog(data);
       setText("command-preview", data.command_preview || data.result?.command_preview || "");
       renderProgress(data.progress);
@@ -910,7 +1023,7 @@ _INDEX_HTML = """
       setText("executed", summary?.executed_evaluations ?? data.progress?.executed_evaluations);
       setText("skipped", summary?.skipped_evaluations ?? data.progress?.skipped_evaluations);
       setText("arbiters", summary?.arbiter_evaluations ?? data.progress?.arbiter_evaluations);
-      if (data.error) setText("output", data.error);
+      if (data.error) setText("output", friendlyErrorMessage(data.error));
       else if (data.result) setText("output", data.result.execution_summary);
       renderExecutionTable(data.evaluation_events || []);
     }
@@ -942,7 +1055,7 @@ _INDEX_HTML = """
           formatBoolean(event.arbiter_triggered),
           event.trigger_reason,
           formatLatency(event.latency_ms),
-          event.error
+          friendlyErrorMessage(event.error)
         ]) appendCell(row, display(value));
         const detailsCell = document.createElement("td");
         const button = document.createElement("button");
@@ -992,14 +1105,14 @@ _INDEX_HTML = """
       setText("details-title", `Detalhes da avaliacao #${index + 1} - resposta ${event.answer_id || "-"}`);
       setText("details-prompt", event.prompt || "-");
       setText("details-response", event.raw_response || "-");
-      setText("details-rationale", event.rationale || event.error || "-");
+      setText("details-rationale", event.rationale || friendlyErrorMessage(event.error) || "-");
       document.getElementById("details-dialog").showModal();
     }
 
     function renderStatusIcon(status) {
       const icon = document.getElementById("run-status-icon");
       icon.className = "status-icon";
-      if (["queued", "running"].includes(status)) {
+      if (["queued", "running", "cancelling"].includes(status)) {
         icon.textContent = "";
         icon.classList.add("spinner");
       } else if (status === "completed" || status === "dry-run") {
@@ -1013,12 +1126,21 @@ _INDEX_HTML = """
       }
     }
 
+    function updateStopButton(runId, status) {
+      const button = document.getElementById("stop-run");
+      const canStop = Boolean(runId) && ["queued", "running", "cancelling"].includes(status);
+      button.disabled = !canStop || status === "cancelling";
+      button.textContent = status === "cancelling" ? "Parando..." : "Parar";
+      activeRunId = canStop ? runId : null;
+    }
+
     async function poll(runId) {
       const data = await (await fetch(`/api/runs/${runId}`)).json();
       renderRun(data);
-      if (["completed", "failed"].includes(data.status) && pollTimer) {
+      if (["completed", "failed", "cancelled"].includes(data.status) && pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
+        activeRunId = null;
       }
     }
 
@@ -1098,7 +1220,7 @@ _INDEX_HTML = """
         }
         setText("history-log-content", await response.text());
       } catch (error) {
-        setText("history-log-content", error.message);
+        setText("history-log-content", friendlyErrorMessage(error.message));
       }
     }
 
@@ -1141,6 +1263,8 @@ _INDEX_HTML = """
         presetRoot.appendChild(btn);
       }
       renderEndpointFields();
+      document.getElementById("dry-run").disabled = false;
+      document.getElementById("run").disabled = false;
     }
 
     function copyEndpointValues(source, target) {
@@ -1190,6 +1314,7 @@ _INDEX_HTML = """
       };
     }
     document.getElementById("details-close").onclick = () => document.getElementById("details-dialog").close();
+    document.getElementById("audit-log-close").onclick = () => document.getElementById("audit-log-dialog").close();
     for (const button of document.querySelectorAll(".tab-button")) {
       button.onclick = () => switchTab(button.dataset.tab);
     }
@@ -1200,19 +1325,29 @@ _INDEX_HTML = """
         renderRun({status:"dry-run", result:data, progress:{percent:100,current:0,total:0}});
       } catch (error) {
         setText("run-status", "failed");
-        setText("output", error.message);
+        setText("output", friendlyErrorMessage(error.message));
+      }
+    };
+    document.getElementById("stop-run").onclick = async () => {
+      if (!activeRunId) return;
+      try {
+        const data = await postJson(`/api/runs/${activeRunId}/cancel`, {});
+        renderRun(data);
+      } catch (error) {
+        setText("output", friendlyErrorMessage(error.message));
       }
     };
     document.getElementById("run").onclick = async () => {
       try {
         const data = await postJson("/api/runs", payload());
+        activeRunId = data.run_id;
         renderRun(data);
         if (pollTimer) clearInterval(pollTimer);
         pollTimer = setInterval(() => poll(data.run_id), 1000);
         await poll(data.run_id);
       } catch (error) {
         setText("run-status", "failed");
-        setText("output", error.message);
+        setText("output", friendlyErrorMessage(error.message));
       }
     };
     loadConfig();

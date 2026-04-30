@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -54,6 +55,7 @@ class FakeRunJudgeService:
         on_resolved=None,
         eligibility_callback=None,
         evaluation_callback=None,
+        should_stop=None,
     ):
         self.requests.append(request)
         eligibility = EligibilitySummary(missing=83, failed=7, successful=240, batch_size=1, will_process=1)
@@ -132,6 +134,7 @@ class BlockingRunJudgeService(FakeRunJudgeService):
         on_resolved=None,
         eligibility_callback=None,
         evaluation_callback=None,
+        should_stop=None,
     ):
         self.started.set()
         self.release.wait(timeout=2)
@@ -141,6 +144,7 @@ class BlockingRunJudgeService(FakeRunJudgeService):
             on_resolved=on_resolved,
             eligibility_callback=eligibility_callback,
             evaluation_callback=evaluation_callback,
+            should_stop=should_stop,
         )
 
 
@@ -180,7 +184,9 @@ def test_web_index_contains_endpoint_and_advanced_controls() -> None:
     assert 'id="remote_judge_openai_compatible"' in response.text
     assert "<summary>Campos avancados</summary>" in response.text
     assert 'id="always_run_arbiter"' in response.text
-    assert '<button id="run">Executar</button>' in response.text
+    assert 'id="dry-run" disabled' in response.text
+    assert 'id="run" disabled' in response.text
+    assert 'id="stop-run" type="button" disabled' in response.text
     assert 'id="run-status-icon"' in response.text
 
 
@@ -307,6 +313,80 @@ def test_run_exposes_audit_log_link_and_file_content(tmp_path) -> None:
     log_response = client.get(data["audit_log_url"])
     assert log_response.status_code == 200
     assert log_response.text == "audit content\n"
+
+
+def test_index_includes_modal_live_audit_log_viewer() -> None:
+    client = TestClient(create_app(FakeRunJudgeService()))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'id="audit-log-dialog"' in response.text
+    assert 'className = "audit-log-button"' in response.text
+    assert 'className = "audit-log-button-icon"' in response.text
+    assert "Live log" in response.text
+    assert 'id="audit-log-content"' in response.text
+    assert "overflow:auto" in response.text
+    assert "openAuditLogDialog" in response.text
+    assert "loadCurrentAuditLog" in response.text
+
+
+def test_index_translates_common_runtime_errors() -> None:
+    client = TestClient(create_app(FakeRunJudgeService()))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "function friendlyErrorMessage" in response.text
+    assert "Configure a URL do endpoint do juiz" in response.text
+    assert "Configure a key local; não commitar" in response.text
+    assert "O modelo não respeitou o contrato de saída" in response.text
+    assert "Modelo inválido ou sem acesso nesse provedor" in response.text
+    assert "aumentar timeout ou reduzir batch" in response.text
+    assert "key inválida ou sem permissão" in response.text
+    assert "base URL/modelo incorreto" in response.text
+
+
+def test_index_reloads_config_and_retries_stale_csrf_token() -> None:
+    client = TestClient(create_app(FakeRunJudgeService()))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "Invalid CSRF token." in response.text
+    assert "return postJson(url, body, false)" in response.text
+    assert 'document.getElementById("dry-run").disabled = false' in response.text
+    assert 'document.getElementById("run").disabled = false' in response.text
+
+
+def test_active_run_can_be_cancelled_without_deleting_progress() -> None:
+    service = BlockingRunJudgeService()
+    client = TestClient(create_app(service))
+    token = client.get("/api/config").json()["csrf_token"]
+
+    created = client.post(
+        "/api/runs",
+        headers={"x-csrf-token": token},
+        json={"panel_mode": "single", "dataset": "J2", "batch_size": 1},
+    )
+    assert created.status_code == 200
+    assert service.started.wait(timeout=1)
+
+    run_id = created.json()["run_id"]
+    cancelled = client.post(f"/api/runs/{run_id}/cancel", headers={"x-csrf-token": token}, json={})
+    service.release.set()
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelling"
+    current = client.get(f"/api/runs/{run_id}")
+    for _ in range(20):
+        if current.json()["status"] == "cancelled":
+            break
+        time.sleep(0.05)
+        current = client.get(f"/api/runs/{run_id}")
+    assert current.status_code == 200
+    assert current.json()["status"] == "cancelled"
+    assert current.json()["result"]["summary"]["executed_evaluations"] == 1
 
 
 def test_second_run_is_rejected_while_one_is_active() -> None:
