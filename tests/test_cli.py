@@ -24,6 +24,15 @@ def test_run_judge_help_exits_successfully() -> None:
     assert exit_error.value.code == 0
 
 
+def test_run_judge_help_exposes_batch_size(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_error:
+        cli.main(["run-judge", "--help"])
+
+    output = capsys.readouterr().out
+    assert exit_error.value.code == 0
+    assert "--batch-size" in output
+
+
 def test_run_judge_dry_run_prints_single_summary(capsys: pytest.CaptureFixture[str], tmp_path) -> None:
     """Dry-run should resolve config without DB or HTTP calls."""
     audit_path = tmp_path / "audit.log"
@@ -39,6 +48,8 @@ def test_run_judge_dry_run_prints_single_summary(capsys: pytest.CaptureFixture[s
             "J2",
             "--limit",
             "1",
+            "--batch-size",
+            "7",
             "--dry-run",
             "--audit-log",
             str(audit_path),
@@ -48,6 +59,7 @@ def test_run_judge_dry_run_prints_single_summary(capsys: pytest.CaptureFixture[s
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "Judge mode: single" in output
+    assert "Batch size: 7" in output
     assert "m-prometheus-14b -> Unbabel/M-Prometheus-14B | endpoint=" in output
     assert f"Audit log: {audit_path}" in output
     assert "test-key" not in output

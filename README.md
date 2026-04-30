@@ -180,6 +180,7 @@ O modo `single` usa `REMOTE_JUDGE_MODEL`, o mesmo modelo do juiz 1. Se só a URL
 | `JUDGE_ARBITRATION_MIN_DELTA` | `2` | Para arbitragem mais ou menos sensível. |
 | `JUDGE_ALWAYS_RUN_ARBITER` | `false` | Use `true` só para auditoria/amostra. |
 | `JUDGE_EXECUTION_STRATEGY` | `sequential` | Use `parallel` quando o endpoint aceitar concorrência. |
+| `JUDGE_BATCH_SIZE` | `10` | Quantas respostas pendentes buscar por execução incremental. |
 | `REMOTE_JUDGE_TIMEOUT_SECONDS` | `180` | Para modelos lentos. |
 | `REMOTE_JUDGE_TEMPERATURE` | `0.0` | Mantenha assim para avaliação mais determinística. |
 | `REMOTE_JUDGE_MAX_TOKENS` | `4000` | Reduza só se o endpoint tiver limite baixo; Gemini truncou JSON com valores menores nos testes. |
@@ -237,8 +238,22 @@ Override por execução:
   --secondary-judge-model llama-3.3-70b-instruct \
   --judge-execution-strategy parallel \
   --dataset J2 \
-  --limit 10
+  --batch-size 10
 ```
+
+### Execução incremental por batch
+
+Use `--batch-size` para limitar quantas respostas pendentes serão selecionadas no banco:
+
+```bash
+.venv/bin/python -m atividade_2.cli run-judge \
+  --dataset J2 \
+  --batch-size 10
+```
+
+Se `--batch-size` não for informado, a CLI usa `JUDGE_BATCH_SIZE` do `.env`; se a variável também não existir, usa `10`.
+
+A seleção é automática: a pipeline busca respostas ainda sem avaliação bem-sucedida para o modo/modelos resolvidos. Avaliações ausentes e avaliações registradas com status diferente de `success` permanecem elegíveis para uma próxima execução. Assim, repetir o mesmo comando continua a partir do estado persistido em `avaliacoes_juiz`.
 
 ### Exemplos
 
@@ -249,7 +264,7 @@ Validar configuração sem chamar banco nem endpoint:
   --panel-mode single \
   --judge-model openai/gpt-oss-120b \
   --dataset J2 \
-  --limit 1 \
+  --batch-size 1 \
   --dry-run
 ```
 
@@ -259,7 +274,7 @@ Smoke test real com uma questão objetiva:
 .venv/bin/python -m atividade_2.cli run-judge \
   --panel-mode single \
   --dataset J2 \
-  --limit 1
+  --batch-size 1
 ```
 
 Smoke test real com uma peça/discursiva:
@@ -268,7 +283,7 @@ Smoke test real com uma peça/discursiva:
 .venv/bin/python -m atividade_2.cli run-judge \
   --panel-mode single \
   --dataset J1 \
-  --limit 1
+  --batch-size 1
 ```
 
 Rodar exatamente dois juízes:
@@ -279,7 +294,7 @@ Rodar exatamente dois juízes:
   --judge-model gpt-oss-120b \
   --secondary-judge-model llama-3.3-70b-instruct \
   --dataset J2 \
-  --limit 10
+  --batch-size 10
 ```
 
 Rodar o modo `2plus1` padrão do `.env`:
@@ -288,7 +303,7 @@ Rodar o modo `2plus1` padrão do `.env`:
 .venv/bin/python -m atividade_2.cli run-judge \
   --panel-mode 2plus1 \
   --dataset J2 \
-  --limit 10
+  --batch-size 10
 ```
 
 Rodar os três juízes sempre:
@@ -298,7 +313,7 @@ Rodar os três juízes sempre:
   --panel-mode 2plus1 \
   --always-run-arbiter \
   --dataset J2 \
-  --limit 20
+  --batch-size 20
 ```
 
 ### Audit log
@@ -318,7 +333,7 @@ Escolha um caminho explícito:
   --panel-mode single \
   --judge-model m-prometheus-14b \
   --dataset J2 \
-  --limit 1 \
+  --batch-size 1 \
   --audit-log outputs/audit/smoke_j2.log
 ```
 
@@ -329,7 +344,7 @@ Desative a animação de terminal quando quiser saída estável para captura em 
   --panel-mode single \
   --judge-model m-prometheus-14b \
   --dataset J2 \
-  --limit 1 \
+  --batch-size 1 \
   --no-audit-animation
 ```
 
@@ -381,7 +396,7 @@ make db-restore-validate
 - `REMOTE_JUDGE_BASE_URL is required`: copie as variáveis novas de `.env.example` para seu `.env`.
 - `REMOTE_JUDGE_API_KEY is required`: defina uma chave local para o endpoint. Não use chave real em `.env.example`.
 - `Remote judge response did not contain model text`: confirme se o endpoint responde no formato OpenAI `/chat/completions` ou defina `REMOTE_JUDGE_OPENAI_COMPATIBLE=false`.
-- `Judge response contains invalid JSON`: o modelo não seguiu o contrato; rode com `--limit 1`, ajuste o endpoint/modelo e repita.
+- `Judge response contains invalid JSON`: o modelo não seguiu o contrato; rode com `--batch-size 1`, ajuste o endpoint/modelo e repita.
 - Avaliações duplicadas não são regravadas para o mesmo conjunto resposta/modelo/papel/modo; use outro modelo ou limpe intencionalmente o banco se precisar reconstruir uma execução.
 - Use sempre `.venv/bin/python`, nunca `python` ou `python3`, para comandos do projeto.
 

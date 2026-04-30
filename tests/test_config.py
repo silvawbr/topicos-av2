@@ -28,6 +28,24 @@ def test_settings_load_default_models_from_env() -> None:
     assert settings.remote_secondary_judge_model == "llama-3.3-70b-instruct"
     assert settings.remote_arbiter_judge_model == "m-prometheus-14b"
     assert settings.judge_execution_strategy == "sequential"
+    assert settings.judge_batch_size == 10
+
+
+def test_batch_size_can_be_loaded_from_env() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_BATCH_SIZE"] = "25"
+
+    settings = load_settings(dotenv_path=None, env=env)
+
+    assert settings.judge_batch_size == 25
+
+
+def test_invalid_batch_size_fails() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_BATCH_SIZE"] = "0"
+
+    with pytest.raises(ConfigurationError, match="JUDGE_BATCH_SIZE"):
+        load_settings(dotenv_path=None, env=env)
 
 
 def test_dotenv_values_override_process_environment(tmp_path) -> None:
