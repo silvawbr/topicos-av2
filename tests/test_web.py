@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -54,6 +55,7 @@ class FakeRunJudgeService:
         on_resolved=None,
         eligibility_callback=None,
         evaluation_callback=None,
+        should_stop=None,
     ):
         self.requests.append(request)
         eligibility = EligibilitySummary(missing=83, failed=7, successful=240, batch_size=1, will_process=1)
@@ -132,6 +134,7 @@ class BlockingRunJudgeService(FakeRunJudgeService):
         on_resolved=None,
         eligibility_callback=None,
         evaluation_callback=None,
+        should_stop=None,
     ):
         self.started.set()
         self.release.wait(timeout=2)
@@ -141,6 +144,7 @@ class BlockingRunJudgeService(FakeRunJudgeService):
             on_resolved=on_resolved,
             eligibility_callback=eligibility_callback,
             evaluation_callback=evaluation_callback,
+            should_stop=should_stop,
         )
 
 
@@ -154,6 +158,22 @@ def test_web_index_contains_progress_element() -> None:
     assert 'id="eligible-missing"' in response.text
     assert 'id="execution-table-body"' in response.text
     assert "/api/runs/" in response.text
+    assert "Execucoes anteriores" in response.text
+    assert 'id="history-table-body"' in response.text
+    assert 'id="history-log-content"' in response.text
+    assert 'id="post-run-panel" class="post-run-panel" hidden' in response.text
+    assert 'id="post-run-cards"' in response.text
+    assert 'id="score-distribution-chart"' in response.text
+    assert 'id="judge-failures-chart"' in response.text
+    assert 'id="candidate-average-chart"' in response.text
+    assert 'id="judge-average-chart"' in response.text
+    assert "function buildPostRunStats" in response.text
+    assert "function renderPostRunPanel" in response.text
+    assert "showPercent: true" in response.text
+    assert 'className = "bar-percent"' in response.text
+    assert 'className = `bar-count ${valueTone(value, row, options)}`' in response.text
+    assert "function applyBarTone" in response.text
+    assert "function valueTone" in response.text
 
 
 def test_web_index_contains_endpoint_and_advanced_controls() -> None:
@@ -177,7 +197,9 @@ def test_web_index_contains_endpoint_and_advanced_controls() -> None:
     assert 'id="remote_judge_openai_compatible"' in response.text
     assert "<summary>Campos avancados</summary>" in response.text
     assert 'id="always_run_arbiter"' in response.text
-    assert '<button id="run">Executar</button>' in response.text
+    assert 'id="dry-run" disabled' in response.text
+    assert 'id="run" disabled' in response.text
+    assert 'id="stop-run" type="button" disabled' in response.text
     assert 'id="run-status-icon"' in response.text
 
 
@@ -284,6 +306,9 @@ def test_run_lifecycle_exposes_batch_progress() -> None:
     assert data["evaluation_events"][0]["question_id"] == 10
     assert data["evaluation_events"][0]["candidate_model"] == "modelo-candidato"
     assert data["evaluation_events"][0]["latency_ms"] == 123
+    assert data["started_at"] is not None
+    assert data["finished_at"] is not None
+    assert data["duration"] is not None
 
 
 def test_run_exposes_audit_log_link_and_file_content(tmp_path) -> None:
@@ -304,6 +329,80 @@ def test_run_exposes_audit_log_link_and_file_content(tmp_path) -> None:
     log_response = client.get(data["audit_log_url"])
     assert log_response.status_code == 200
     assert log_response.text == "audit content\n"
+
+
+def test_index_includes_modal_live_audit_log_viewer() -> None:
+    client = TestClient(create_app(FakeRunJudgeService()))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'id="audit-log-dialog"' in response.text
+    assert 'className = "audit-log-button"' in response.text
+    assert 'className = "audit-log-button-icon"' in response.text
+    assert "Live log" in response.text
+    assert 'id="audit-log-content"' in response.text
+    assert "overflow:auto" in response.text
+    assert "openAuditLogDialog" in response.text
+    assert "loadCurrentAuditLog" in response.text
+
+
+def test_index_translates_common_runtime_errors() -> None:
+    client = TestClient(create_app(FakeRunJudgeService()))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "function friendlyErrorMessage" in response.text
+    assert "Configure a URL do endpoint do juiz" in response.text
+    assert "Configure a key local; não commitar" in response.text
+    assert "O modelo não respeitou o contrato de saída" in response.text
+    assert "Modelo inválido ou sem acesso nesse provedor" in response.text
+    assert "aumentar timeout ou reduzir batch" in response.text
+    assert "key inválida ou sem permissão" in response.text
+    assert "base URL/modelo incorreto" in response.text
+
+
+def test_index_reloads_config_and_retries_stale_csrf_token() -> None:
+    client = TestClient(create_app(FakeRunJudgeService()))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "Invalid CSRF token." in response.text
+    assert "return postJson(url, body, false)" in response.text
+    assert 'document.getElementById("dry-run").disabled = false' in response.text
+    assert 'document.getElementById("run").disabled = false' in response.text
+
+
+def test_active_run_can_be_cancelled_without_deleting_progress() -> None:
+    service = BlockingRunJudgeService()
+    client = TestClient(create_app(service))
+    token = client.get("/api/config").json()["csrf_token"]
+
+    created = client.post(
+        "/api/runs",
+        headers={"x-csrf-token": token},
+        json={"panel_mode": "single", "dataset": "J2", "batch_size": 1},
+    )
+    assert created.status_code == 200
+    assert service.started.wait(timeout=1)
+
+    run_id = created.json()["run_id"]
+    cancelled = client.post(f"/api/runs/{run_id}/cancel", headers={"x-csrf-token": token}, json={})
+    service.release.set()
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelling"
+    current = client.get(f"/api/runs/{run_id}")
+    for _ in range(20):
+        if current.json()["status"] == "cancelled":
+            break
+        time.sleep(0.05)
+        current = client.get(f"/api/runs/{run_id}")
+    assert current.status_code == 200
+    assert current.json()["status"] == "cancelled"
+    assert current.json()["result"]["summary"]["executed_evaluations"] == 1
 
 
 def test_second_run_is_rejected_while_one_is_active() -> None:
@@ -327,3 +426,90 @@ def test_second_run_is_rejected_while_one_is_active() -> None:
     service.release.set()
 
     assert second.status_code == 409
+
+
+def test_run_history_lists_audit_logs_with_metadata(tmp_path) -> None:
+    _write_audit_log(
+        tmp_path / "judge_run_20260430_104512.log",
+        """
+2026-04-30T13:45:12+00:00 | audit_log_started | path=outputs/audit/judge_run_20260430_104512.log
+2026-04-30T13:45:12+00:00 | execution_summary | Judge provider: remote_http | Judge mode: 2plus1 | Judge execution strategy: sequential
+2026-04-30T13:45:12+00:00 | command_preview | .venv/bin/python -m atividade_2.cli run-judge --panel-mode 2plus1 --dataset J2 --batch-size 10 --judge-execution-strategy sequential
+2026-04-30T13:45:20+00:00 | evaluation_parsed | answer_id=1 status=failed
+2026-04-30T13:49:24+00:00 | execution_result | selected=10 executed=8 skipped=0 arbiters=1
+2026-04-30T13:49:24+00:00 | audit_log_finished
+""",
+    )
+    _write_audit_log(
+        tmp_path / "judge_run_20260430_120000.log",
+        """
+2026-04-30T15:00:00+00:00 | audit_log_started | path=outputs/audit/judge_run_20260430_120000.log
+2026-04-30T15:00:00+00:00 | execution_summary | Judge provider: remote_http | Judge mode: single | Judge execution strategy: parallel
+2026-04-30T15:00:00+00:00 | command_preview | .venv/bin/python -m atividade_2.cli run-judge --panel-mode single --dataset J1 --batch-size 1 --judge-execution-strategy parallel
+2026-04-30T15:00:07+00:00 | execution_result | selected=1 executed=1 skipped=0 arbiters=0
+2026-04-30T15:00:07+00:00 | audit_log_finished
+""",
+    )
+    client = TestClient(create_app(FakeRunJudgeService(), audit_dir=tmp_path))
+
+    response = client.get("/api/run-history")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [row["run_id"] for row in data] == ["judge_run_20260430_120000", "judge_run_20260430_104512"]
+    older = data[1]
+    assert older["timestamp"] == "2026-04-30T13:45:12+00:00"
+    assert older["mode"] == "2plus1"
+    assert older["dataset"] == "J2"
+    assert older["batch_size"] == 10
+    assert older["successes"] == 8
+    assert older["failures"] == 1
+    assert older["duration"] == "4min12s"
+    assert older["log_url"] == "/api/run-history/judge_run_20260430_104512/audit-log"
+
+
+def test_run_history_log_endpoint_returns_file_content(tmp_path) -> None:
+    log_path = tmp_path / "judge_run_20260430_104512.log"
+    _write_audit_log(log_path, "2026-04-30T13:45:12+00:00 | audit_log_started\n")
+    client = TestClient(create_app(FakeRunJudgeService(), audit_dir=tmp_path))
+
+    response = client.get("/api/run-history/judge_run_20260430_104512/audit-log")
+
+    assert response.status_code == 200
+    assert response.text == "2026-04-30T13:45:12+00:00 | audit_log_started\n"
+
+
+def test_run_history_exports_csv_and_json(tmp_path) -> None:
+    _write_audit_log(
+        tmp_path / "judge_run_20260430_104512.log",
+        """
+2026-04-30T13:45:12+00:00 | audit_log_started
+2026-04-30T13:45:12+00:00 | execution_summary | Judge mode: single
+2026-04-30T13:45:12+00:00 | command_preview | .venv/bin/python -m atividade_2.cli run-judge --dataset J2 --batch-size 3
+2026-04-30T13:45:13+00:00 | execution_result | selected=3 executed=3 skipped=0 arbiters=0
+""",
+    )
+    client = TestClient(create_app(FakeRunJudgeService(), audit_dir=tmp_path))
+
+    json_response = client.get("/api/run-history/export.json")
+    csv_response = client.get("/api/run-history/export.csv")
+
+    assert json_response.status_code == 200
+    assert json_response.json()[0]["run_id"] == "judge_run_20260430_104512"
+    assert csv_response.status_code == 200
+    assert csv_response.text.splitlines()[0] == (
+        "run_id,timestamp,mode,dataset,batch_size,successes,failures,duration,log_path"
+    )
+    assert "judge_run_20260430_104512,2026-04-30T13:45:12+00:00,single,J2,3,3,0,1s," in csv_response.text
+
+
+def test_run_history_rejects_path_traversal(tmp_path) -> None:
+    client = TestClient(create_app(FakeRunJudgeService(), audit_dir=tmp_path))
+
+    response = client.get("/api/run-history/../secret/audit-log")
+
+    assert response.status_code in {400, 404}
+
+
+def _write_audit_log(path: Path, content: str) -> None:
+    path.write_text(content.strip() + "\n", encoding="utf-8")

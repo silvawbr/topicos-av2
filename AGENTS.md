@@ -45,6 +45,16 @@ Before considering work complete:
 - Document commands executed and results observed.
 - Do not claim validation passed if it was not run.
 
+## Web UI deployment
+
+After Web UI changes or when a new local deploy is needed, run:
+
+```bash
+make web-up
+```
+
+This command is the canonical way to rebuild/restart the local Web UI and refresh the content served on port `8000`.
+
 ## Output defaults
 
 For implementation work, respond with:

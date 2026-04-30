@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import csv
+import re
 import secrets
+import shlex
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from io import StringIO
 from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 from .config import ConfigurationError
@@ -20,7 +25,11 @@ from .parser import JudgeParseError
 from .run_judge_service import RunJudgeRequest, RunJudgeResult, RunJudgeService
 
 
-RunStatus = Literal["queued", "running", "completed", "failed"]
+RunStatus = Literal["queued", "running", "cancelling", "completed", "failed", "cancelled"]
+RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+AUDIT_TIMESTAMP_PATTERN = re.compile(r"^([^|]+)\s+\|\s+([^|]+)(?:\s+\|\s+(.*))?$")
+AUDIT_KEY_VALUE_PATTERN = re.compile(r"([A-Za-z_]+)=([^ ]+)")
+DEFAULT_AUDIT_DIR = Path("outputs") / "audit"
 
 
 class RunPayload(BaseModel):
@@ -79,6 +88,8 @@ class JobState:
     run_id: str
     status: RunStatus
     request: RunJudgeRequest
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
     progress: BatchProgress = field(default_factory=lambda: _initial_progress())
     result: RunJudgeResult | None = None
     error: str | None = None
@@ -86,6 +97,25 @@ class JobState:
     command_preview: str | None = None
     eligibility: EligibilitySummary | None = None
     evaluation_events: list[EvaluationProgress] = field(default_factory=list)
+    cancel_requested: bool = False
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+
+@dataclass(frozen=True)
+class RunHistoryEntry:
+    run_id: str
+    timestamp: str | None
+    finished_at: str | None
+    mode: str | None
+    dataset: str | None
+    batch_size: int | None
+    successes: int
+    failures: int
+    duration_seconds: int | None
+    duration: str | None
+    log_path: str
+    log_url: str
+    summary: str | None
 
 
 class JobRegistry:
@@ -121,10 +151,29 @@ class JobRegistry:
         with self._lock:
             return self._jobs.get(run_id)
 
+    def cancel(self, run_id: str) -> JobState | None:
+        with self._lock:
+            job = self._jobs.get(run_id)
+            if job is None:
+                return None
+            if job.status in {"queued", "running", "cancelling"}:
+                job.cancel_requested = True
+                job.cancel_event.set()
+                job.status = "cancelling"
+                return job
+            return job
+
     def _run(self, run_id: str) -> None:
         with self._lock:
             job = self._jobs[run_id]
+            if job.cancel_requested:
+                job.status = "cancelled"
+                job.finished_at = datetime.now()
+                if self._active_run_id == run_id:
+                    self._active_run_id = None
+                return
             job.status = "running"
+            job.started_at = datetime.now()
 
         def update_progress(progress: BatchProgress) -> None:
             with self._lock:
@@ -144,16 +193,19 @@ class JobRegistry:
                 progress_callback=update_progress,
                 eligibility_callback=update_eligibility,
                 evaluation_callback=update_evaluation,
+                should_stop=job.cancel_event.is_set,
             )
         except (ConfigurationError, RemoteJudgeError, JudgeParseError, RuntimeError, ValueError) as error:
             with self._lock:
                 job = self._jobs[run_id]
                 job.status = "failed"
+                job.finished_at = datetime.now()
                 job.error = str(error)
         else:
             with self._lock:
                 job = self._jobs[run_id]
-                job.status = "completed"
+                job.status = "cancelled" if job.cancel_requested else "completed"
+                job.finished_at = datetime.now()
                 job.result = result
                 job.audit_log = result.audit_log
                 job.command_preview = result.command_preview
@@ -164,10 +216,11 @@ class JobRegistry:
                     self._active_run_id = None
 
 
-def create_app(service: RunJudgeService | None = None) -> FastAPI:
+def create_app(service: RunJudgeService | None = None, *, audit_dir: Path | str = DEFAULT_AUDIT_DIR) -> FastAPI:
     app = FastAPI(title="Atividade 2 Judge Console")
     app.state.csrf_token = secrets.token_urlsafe(32)
     app.state.jobs = JobRegistry(service or RunJudgeService())
+    app.state.audit_dir = Path(audit_dir)
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -205,6 +258,14 @@ def create_app(service: RunJudgeService | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Run not found.")
         return _serialize_job(job)
 
+    @app.post("/api/runs/{run_id}/cancel", dependencies=[Depends(_require_csrf)])
+    def cancel_run(run_id: str, request: Request) -> dict:
+        registry: JobRegistry = request.app.state.jobs
+        job = registry.cancel(run_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Run not found.")
+        return _serialize_job(job)
+
     @app.get("/api/runs/{run_id}/audit-log", response_class=PlainTextResponse)
     def get_audit_log(run_id: str, request: Request) -> str:
         registry: JobRegistry = request.app.state.jobs
@@ -214,6 +275,42 @@ def create_app(service: RunJudgeService | None = None) -> FastAPI:
         if not job.audit_log:
             raise HTTPException(status_code=404, detail="Audit log not available.")
         audit_path = Path(job.audit_log)
+        if not audit_path.exists() or not audit_path.is_file():
+            raise HTTPException(status_code=404, detail="Audit log file not found.")
+        return audit_path.read_text(encoding="utf-8")
+
+    @app.get("/api/run-history")
+    def get_run_history(request: Request) -> list[dict]:
+        return _list_run_history(request.app.state.audit_dir)
+
+    @app.get("/api/run-history/export.json")
+    def export_run_history_json(request: Request) -> list[dict]:
+        return _list_run_history(request.app.state.audit_dir)
+
+    @app.get("/api/run-history/export.csv")
+    def export_run_history_csv(request: Request) -> Response:
+        rows = _list_run_history(request.app.state.audit_dir)
+        output = StringIO()
+        fieldnames = [
+            "run_id",
+            "timestamp",
+            "mode",
+            "dataset",
+            "batch_size",
+            "successes",
+            "failures",
+            "duration",
+            "log_path",
+        ]
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field) for field in fieldnames})
+        return Response(content=output.getvalue(), media_type="text/csv; charset=utf-8")
+
+    @app.get("/api/run-history/{run_id}/audit-log", response_class=PlainTextResponse)
+    def get_run_history_audit_log(run_id: str, request: Request) -> str:
+        audit_path = _resolve_history_log_path(request.app.state.audit_dir, run_id)
         if not audit_path.exists() or not audit_path.is_file():
             raise HTTPException(status_code=404, detail="Audit log file not found.")
         return audit_path.read_text(encoding="utf-8")
@@ -231,6 +328,10 @@ def _serialize_job(job: JobState) -> dict:
     return {
         "run_id": job.run_id,
         "status": job.status,
+        "started_at": job.started_at.isoformat() if job.started_at is not None else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at is not None else None,
+        "duration_seconds": _duration_seconds(job.started_at, job.finished_at, 0),
+        "duration": _format_duration(_duration_seconds(job.started_at, job.finished_at, 0)),
         "progress": asdict(job.progress),
         "audit_log": job.audit_log,
         "audit_log_url": f"/api/runs/{job.run_id}/audit-log" if job.audit_log else None,
@@ -258,6 +359,163 @@ def _serialize_summary(summary: PipelineSummary | None) -> dict | None:
     if summary is None:
         return None
     return asdict(summary)
+
+
+def _list_run_history(audit_dir: Path) -> list[dict]:
+    if not audit_dir.exists() or not audit_dir.is_dir():
+        return []
+    entries = [_parse_audit_log(path) for path in audit_dir.glob("*.log") if path.is_file()]
+    entries.sort(key=lambda entry: entry.timestamp or "", reverse=True)
+    return [asdict(entry) for entry in entries]
+
+
+def _parse_audit_log(path: Path) -> RunHistoryEntry:
+    first_timestamp: datetime | None = None
+    last_timestamp: datetime | None = None
+    mode: str | None = None
+    dataset: str | None = None
+    batch_size: int | None = None
+    successes = 0
+    failures = 0
+    summary: str | None = None
+    elapsed_ms_total = 0
+
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        parsed = _parse_audit_line(line)
+        if parsed is None:
+            continue
+        timestamp, message, detail = parsed
+        first_timestamp = first_timestamp or timestamp
+        last_timestamp = timestamp
+        elapsed_ms_total += _extract_elapsed_ms(detail)
+        if message == "execution_summary":
+            summary = detail
+            mode = _extract_summary_value(detail, "Judge mode")
+        elif message == "command_preview":
+            dataset = _extract_cli_arg(detail, "--dataset") or dataset
+            batch_size = _parse_int(_extract_cli_arg(detail, "--batch-size")) or batch_size
+        elif message.startswith("START Counting eligible answers for ") or message.startswith(
+            "START Selecting pending candidate answers for "
+        ):
+            values = _key_values(detail)
+            dataset = values.get("dataset") or dataset
+            batch_size = _parse_int(values.get("batch_size")) or batch_size
+        elif message == "execution_result":
+            values = _key_values(detail)
+            successes = _parse_int(values.get("executed")) or successes
+        if _is_failure_event(message, detail):
+            failures += 1
+
+    duration_seconds = _duration_seconds(first_timestamp, last_timestamp, elapsed_ms_total)
+    run_id = path.stem
+    return RunHistoryEntry(
+        run_id=run_id,
+        timestamp=first_timestamp.isoformat() if first_timestamp is not None else None,
+        finished_at=last_timestamp.isoformat() if last_timestamp is not None else None,
+        mode=mode,
+        dataset=dataset,
+        batch_size=batch_size,
+        successes=successes,
+        failures=failures,
+        duration_seconds=duration_seconds,
+        duration=_format_duration(duration_seconds),
+        log_path=str(path),
+        log_url=f"/api/run-history/{run_id}/audit-log",
+        summary=summary,
+    )
+
+
+def _parse_audit_line(line: str) -> tuple[datetime, str, str | None] | None:
+    match = AUDIT_TIMESTAMP_PATTERN.match(line)
+    if not match:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(match.group(1).strip())
+    except ValueError:
+        return None
+    return timestamp, match.group(2).strip(), match.group(3).strip() if match.group(3) else None
+
+
+def _extract_summary_value(summary: str | None, label: str) -> str | None:
+    if not summary:
+        return None
+    prefix = f"{label}: "
+    for part in (value.strip() for value in summary.split("|")):
+        if part.startswith(prefix):
+            return part.removeprefix(prefix).strip()
+    return None
+
+
+def _extract_cli_arg(command: str | None, option: str) -> str | None:
+    if not command:
+        return None
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.split()
+    for index, part in enumerate(parts[:-1]):
+        if part == option:
+            return parts[index + 1]
+    return None
+
+
+def _key_values(detail: str | None) -> dict[str, str]:
+    if not detail:
+        return {}
+    return {match.group(1): match.group(2) for match in AUDIT_KEY_VALUE_PATTERN.finditer(detail)}
+
+
+def _extract_elapsed_ms(detail: str | None) -> int:
+    return _parse_int(_key_values(detail).get("elapsed_ms")) or 0
+
+
+def _parse_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _is_failure_event(message: str, detail: str | None) -> bool:
+    if message.startswith("FAIL ") or message == "audit_log_failed":
+        return True
+    return "status=failed" in (detail or "")
+
+
+def _duration_seconds(
+    first_timestamp: datetime | None,
+    last_timestamp: datetime | None,
+    elapsed_ms_total: int,
+) -> int | None:
+    if first_timestamp is not None and last_timestamp is not None:
+        return max(0, round((last_timestamp - first_timestamp).total_seconds()))
+    if elapsed_ms_total:
+        return round(elapsed_ms_total / 1000)
+    return None
+
+
+def _format_duration(seconds: int | None) -> str | None:
+    if seconds is None:
+        return None
+    minutes, remaining_seconds = divmod(seconds, 60)
+    hours, remaining_minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{remaining_minutes:02d}min{remaining_seconds:02d}s"
+    if minutes:
+        return f"{minutes}min{remaining_seconds:02d}s"
+    return f"{remaining_seconds}s"
+
+
+def _resolve_history_log_path(audit_dir: Path, run_id: str) -> Path:
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise HTTPException(status_code=400, detail="Invalid run id.")
+    root = audit_dir.resolve()
+    path = (root / f"{run_id}.log").resolve()
+    if path.parent != root:
+        raise HTTPException(status_code=400, detail="Invalid run id.")
+    return path
 
 
 def _upsert_evaluation_event(events: list[EvaluationProgress], event: EvaluationProgress) -> None:
@@ -306,6 +564,10 @@ _INDEX_HTML = """
     body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--ink); background:var(--bg); }
     header { padding:20px 28px 12px; border-bottom:1px solid var(--line); background:#fff; }
     h1 { margin:0 0 6px; font-size:22px; letter-spacing:0; }
+    .tabs { display:flex; gap:8px; padding:12px 28px 0; background:#fff; border-bottom:1px solid var(--line); }
+    .tab-button { min-height:34px; color:var(--muted); background:#fff; border-color:transparent; border-bottom:2px solid transparent; border-radius:0; }
+    .tab-button.active { color:var(--accent); border-bottom-color:var(--accent); }
+    .tab-panel[hidden] { display:none; }
     main { width:min(100%, 1440px); margin:0 auto; padding:20px; display:grid; grid-template-columns: minmax(320px,380px) minmax(0,1fr); gap:18px; }
     section, aside { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; }
     section, aside { min-width:0; }
@@ -314,6 +576,7 @@ _INDEX_HTML = """
     label { display:grid; gap:5px; margin:10px 0; color:var(--muted); font-size:12px; }
     input, select { width:100%; min-height:36px; border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; color:var(--ink); background:#fff; }
     button { border:1px solid var(--accent); background:var(--accent); color:#fff; border-radius:6px; min-height:36px; padding:0 12px; font-weight:650; cursor:pointer; }
+    .button-link { display:inline-flex; align-items:center; min-height:32px; padding:0 10px; border:1px solid var(--accent); border-radius:6px; color:var(--accent); background:#fff; font-size:12px; font-weight:650; text-decoration:none; }
     button.secondary { color:var(--accent); background:#fff; }
     button:disabled { opacity:.55; cursor:not-allowed; }
     .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
@@ -341,6 +604,46 @@ _INDEX_HTML = """
     th, td { text-align:left; border-bottom:1px solid var(--line); padding:8px; }
     .table-wrap { width:100%; max-width:100%; overflow:auto; border:1px solid var(--line); border-radius:8px; margin-top:12px; }
     .table-wrap table { min-width:1180px; margin-top:0; }
+    .history-layout { width:min(100%, 1440px); margin:0 auto; padding:20px; display:grid; grid-template-columns:minmax(0,1fr) minmax(320px,480px); gap:18px; }
+    .history-actions { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+    .history-actions div { display:flex; gap:8px; }
+    .history-row { cursor:pointer; }
+    .history-row:hover { background:#f7fbff; }
+    .history-log { min-height:520px; max-height:calc(100vh - 260px); }
+    .history-export-links { display:flex; gap:8px; white-space:nowrap; }
+    .audit-log-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:center; }
+    .audit-log-row a { overflow-wrap:anywhere; }
+    .audit-log-button { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:30px; padding:0 9px; border-color:var(--line); background:#fff; color:var(--accent); font-size:12px; white-space:nowrap; }
+    .audit-log-button-icon { font-size:15px; line-height:1; }
+    .audit-log-button:disabled { color:var(--muted); }
+    .audit-log-content { min-height:420px; max-height:calc(100vh - 210px); margin:0; overflow:auto; }
+    .post-run-panel { margin-top:18px; border-top:1px solid var(--line); padding-top:16px; }
+    .metric-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px,1fr)); gap:10px; margin:10px 0 16px; }
+    .metric-card { border:1px solid var(--line); border-radius:8px; padding:10px; background:#fbfcfe; min-width:0; }
+    .metric-value { display:block; font-size:22px; font-weight:750; line-height:1.15; overflow-wrap:anywhere; }
+    .metric-label { display:block; color:var(--muted); font-size:12px; margin-top:3px; }
+    .chart-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px,1fr)); gap:14px; }
+    .chart { border:1px solid var(--line); border-radius:8px; padding:12px; min-width:0; }
+    .chart h3 { margin:0 0 10px; font-size:13px; }
+    .bar-row { display:grid; grid-template-columns:minmax(82px,132px) minmax(88px,1fr) 104px; gap:8px; align-items:center; margin:7px 0; font-size:12px; }
+    .bar-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
+    .bar-track { height:14px; border-radius:999px; background:#e5e9f0; overflow:hidden; box-shadow:inset 0 0 0 1px rgba(24,33,47,.03); }
+    .bar-fill { height:100%; min-width:4px; border-radius:999px; background:linear-gradient(90deg, #1769aa, #1d7f4e); }
+    .bar-fill.score-1 { background:#b42318; }
+    .bar-fill.score-2 { background:#d97706; }
+    .bar-fill.score-3 { background:#1769aa; }
+    .bar-fill.score-4 { background:#1d7f4e; }
+    .bar-fill.score-5 { background:#0f766e; }
+    .bar-fill.failed { background:#b42318; }
+    .bar-fill.arbiter { background:#7c3aed; }
+    .bar-fill.none { background:#64748b; }
+    .bar-fill.zero { min-width:0; }
+    .bar-value { display:grid; grid-template-columns:42px 54px; justify-content:end; align-items:center; gap:6px; font-variant-numeric:tabular-nums; color:var(--ink); font-weight:800; white-space:nowrap; font-size:13px; }
+    .bar-count { --pill-fill:#1769aa; --pill-bg:#eaf3fb; --pill-pct:0%; width:42px; text-align:center; border-radius:999px; padding:2px 0; color:var(--accent); background:linear-gradient(90deg, color-mix(in srgb, var(--pill-fill) 26%, white) 0 var(--pill-pct), var(--pill-bg) var(--pill-pct) 100%); }
+    .bar-count.positive { --pill-fill:#1d7f4e; --pill-bg:#e7f7ee; color:var(--ok); }
+    .bar-count.warning { --pill-fill:#9a5b00; --pill-bg:#fff4df; color:var(--warn); }
+    .bar-count.bad { --pill-fill:#b42318; --pill-bg:#fff1f0; color:var(--bad); }
+    .bar-percent { color:var(--muted); font-weight:600; text-align:right; }
     .badge { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:2px 7px; font-size:12px; white-space:nowrap; }
     .badge.success { color:var(--ok); border-color:#b7dfc8; background:#f0fbf4; }
     .badge.failed { color:var(--bad); border-color:#f0b8b2; background:#fff5f5; }
@@ -355,7 +658,7 @@ _INDEX_HTML = """
     .ok { color:var(--ok); }
     .bad { color:var(--bad); }
     .muted { color:var(--muted); }
-    @media (max-width: 860px) { main { grid-template-columns:minmax(0,1fr); padding:12px; } }
+    @media (max-width: 860px) { main, .history-layout { grid-template-columns:minmax(0,1fr); padding:12px; } }
   </style>
 </head>
 <body>
@@ -363,7 +666,11 @@ _INDEX_HTML = """
     <h1>Atividade 2 Judge Console</h1>
     <div id="config-status" class="status">Carregando configuracao local...</div>
   </header>
-  <main>
+  <nav class="tabs" aria-label="Navegacao principal">
+    <button class="tab-button active" type="button" data-tab="execution-panel">Execucao</button>
+    <button class="tab-button" type="button" data-tab="history-panel">Execucoes anteriores</button>
+  </nav>
+  <main id="execution-panel" class="tab-panel">
     <aside>
       <h2>Presets</h2>
       <div id="presets" class="presets"></div>
@@ -470,8 +777,9 @@ _INDEX_HTML = """
         </div>
       </details>
       <div class="actions">
-        <button class="secondary" id="dry-run">Validar configuracao</button>
-        <button id="run">Executar</button>
+        <button class="secondary" id="dry-run" disabled>Validar configuracao</button>
+        <button class="secondary" id="stop-run" type="button" disabled>Parar</button>
+        <button id="run" disabled>Executar</button>
       </div>
     </aside>
     <section>
@@ -496,6 +804,32 @@ _INDEX_HTML = """
       <pre id="command-preview"></pre>
       <h2>Resumo / erro</h2>
       <pre id="output"></pre>
+      <div id="post-run-panel" class="post-run-panel" hidden>
+        <h2>Batch finalizado</h2>
+        <div id="post-run-cards" class="metric-grid"></div>
+        <div class="chart-grid">
+          <div class="chart">
+            <h3>Distribuicao de notas 1-5</h3>
+            <div id="score-distribution-chart"></div>
+          </div>
+          <div class="chart">
+            <h3>Falhas por juiz</h3>
+            <div id="judge-failures-chart"></div>
+          </div>
+          <div class="chart">
+            <h3>Arbitragens</h3>
+            <div id="arbitration-chart"></div>
+          </div>
+          <div class="chart">
+            <h3>Media por modelo candidato</h3>
+            <div id="candidate-average-chart"></div>
+          </div>
+          <div class="chart">
+            <h3>Media por juiz</h3>
+            <div id="judge-average-chart"></div>
+          </div>
+        </div>
+      </div>
       <h2 style="margin-top:18px">Tabela dinamica de execucao</h2>
       <div class="table-wrap">
         <table aria-label="Tabela dinamica de execucao">
@@ -523,6 +857,48 @@ _INDEX_HTML = """
       </div>
     </section>
   </main>
+  <div id="history-panel" class="history-layout tab-panel" hidden>
+    <section>
+      <div class="history-actions">
+        <h2>Execucoes anteriores</h2>
+        <div>
+          <a class="button-link" href="/api/run-history/export.csv" download="run-history.csv">CSV</a>
+          <a class="button-link" href="/api/run-history/export.json" download="run-history.json">JSON</a>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table aria-label="Tabela de execucoes anteriores">
+          <thead>
+            <tr>
+              <th>Run ID</th>
+              <th>Data/hora</th>
+              <th>Modo</th>
+              <th>Dataset</th>
+              <th>Batch size</th>
+              <th>Sucessos</th>
+              <th>Falhas</th>
+              <th>Duracao</th>
+              <th>Log</th>
+              <th>Exportar</th>
+            </tr>
+          </thead>
+          <tbody id="history-table-body">
+            <tr><td colspan="10" class="muted">Carregando historico.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <aside>
+      <h2>Log</h2>
+      <table>
+        <tbody>
+          <tr><th>Run ID</th><td id="history-log-run-id" class="muted">Selecione uma execucao.</td></tr>
+          <tr><th>Arquivo</th><td id="history-log-path" class="muted">-</td></tr>
+        </tbody>
+      </table>
+      <pre id="history-log-content" class="history-log">Selecione uma execucao.</pre>
+    </aside>
+  </div>
   <dialog id="details-dialog">
     <div class="dialog-head">
       <strong id="details-title">Detalhes da avaliacao</strong>
@@ -537,28 +913,105 @@ _INDEX_HTML = """
       <pre id="details-rationale"></pre>
     </div>
   </dialog>
+  <dialog id="audit-log-dialog">
+    <div class="dialog-head">
+      <strong>Live audit log</strong>
+      <button class="secondary" id="audit-log-close" type="button">Fechar</button>
+    </div>
+    <div class="dialog-body">
+      <pre id="audit-log-content" class="audit-log-content">Audit log nao selecionado.</pre>
+    </div>
+  </dialog>
   <script>
     let csrfToken = "";
     let pollTimer = null;
+    let historyLoaded = false;
+    let currentAuditLogUrl = null;
+    let activeRunId = null;
 
     function value(id) { return document.getElementById(id).value; }
     function setText(id, text) { document.getElementById(id).textContent = text ?? "-"; }
     function display(value) { return value === null || value === undefined || value === "" ? "-" : value; }
+    function friendlyErrorMessage(message) {
+      const raw = String(message || "");
+      const normalized = raw.toLowerCase();
+      const mappings = [
+        ["REMOTE_JUDGE_BASE_URL is required", "Configure a URL do endpoint do juiz"],
+        ["REMOTE_JUDGE_API_KEY is required", "Configure a key local; não commitar"],
+        ["invalid JSON", "O modelo não respeitou o contrato de saída"],
+        ["model does not exist", "Modelo inválido ou sem acesso nesse provedor"],
+        ["HTTP 401", "key inválida ou sem permissão"],
+        ["HTTP 403", "key inválida ou sem permissão"],
+        ["HTTP 404", "base URL/modelo incorreto"]
+      ];
+      for (const [needle, friendly] of mappings) {
+        if (normalized.includes(needle.toLowerCase())) return friendly;
+      }
+      if (normalized.includes("timeout")) return "aumentar timeout ou reduzir batch";
+      return raw || "Erro desconhecido.";
+    }
+
+    function formatDateTime(value) {
+      if (!value) return "-";
+      return new Date(value).toLocaleString();
+    }
 
     function renderAuditLog(data) {
       const cell = document.getElementById("audit-log");
       const path = data.audit_log || data.result?.audit_log || "-";
+      const auditLogUrl = data.audit_log_url;
+      currentAuditLogUrl = auditLogUrl || null;
       cell.textContent = "";
-      if (data.audit_log_url) {
+      if (auditLogUrl) {
+        const row = document.createElement("span");
+        row.className = "audit-log-row";
         const link = document.createElement("a");
-        link.href = data.audit_log_url;
+        link.href = auditLogUrl;
         link.target = "_blank";
         link.rel = "noopener";
         link.textContent = path;
-        cell.appendChild(link);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "audit-log-button";
+        button.title = "Abrir live audit log";
+        button.setAttribute("aria-label", "Abrir live audit log");
+        const icon = document.createElement("span");
+        icon.className = "audit-log-button-icon";
+        icon.setAttribute("aria-hidden", "true");
+        icon.textContent = "▤";
+        const label = document.createElement("span");
+        label.textContent = "Live log";
+        button.appendChild(icon);
+        button.appendChild(label);
+        button.onclick = openAuditLogDialog;
+        row.appendChild(link);
+        row.appendChild(button);
+        cell.appendChild(row);
+        if (document.getElementById("audit-log-dialog").open) loadCurrentAuditLog();
         return;
       }
       cell.textContent = path;
+    }
+
+    function openAuditLogDialog() {
+      document.getElementById("audit-log-dialog").showModal();
+      loadCurrentAuditLog();
+    }
+
+    async function loadCurrentAuditLog() {
+      const liveLog = document.getElementById("audit-log-content");
+      if (!liveLog || !currentAuditLogUrl) return;
+      try {
+        const response = await fetch(currentAuditLogUrl);
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.detail || "Audit log ainda nao disponivel.");
+        }
+        liveLog.textContent = await response.text();
+        liveLog.scrollTop = liveLog.scrollHeight;
+      } catch (error) {
+        liveLog.textContent = friendlyErrorMessage(error.message);
+      }
     }
 
     function payload() {
@@ -593,13 +1046,18 @@ _INDEX_HTML = """
       return raw === "" ? null : Number(raw);
     }
 
-    async function postJson(url, body) {
+    async function postJson(url, body, retryOnCsrf = true) {
+      if (!csrfToken) await loadConfig();
       const response = await fetch(url, {
         method: "POST",
         headers: {"content-type": "application/json", "x-csrf-token": csrfToken},
         body: JSON.stringify(body)
       });
       const data = await response.json();
+      if (response.status === 403 && data.detail === "Invalid CSRF token." && retryOnCsrf) {
+        await loadConfig();
+        return postJson(url, body, false);
+      }
       if (!response.ok) throw new Error(data.detail || "Request failed");
       return data;
     }
@@ -614,6 +1072,7 @@ _INDEX_HTML = """
       const status = data.status || "dry-run";
       setText("run-status", status);
       renderStatusIcon(status);
+      updateStopButton(data.run_id, status);
       renderAuditLog(data);
       setText("command-preview", data.command_preview || data.result?.command_preview || "");
       renderProgress(data.progress);
@@ -627,9 +1086,177 @@ _INDEX_HTML = """
       setText("executed", summary?.executed_evaluations ?? data.progress?.executed_evaluations);
       setText("skipped", summary?.skipped_evaluations ?? data.progress?.skipped_evaluations);
       setText("arbiters", summary?.arbiter_evaluations ?? data.progress?.arbiter_evaluations);
-      if (data.error) setText("output", data.error);
+      if (data.error) setText("output", friendlyErrorMessage(data.error));
       else if (data.result) setText("output", data.result.execution_summary);
+      renderPostRunPanel(data);
       renderExecutionTable(data.evaluation_events || []);
+    }
+
+    function renderPostRunPanel(data) {
+      const panel = document.getElementById("post-run-panel");
+      const status = data.status || "dry-run";
+      const shouldShow = ["completed", "failed", "cancelled"].includes(status) && Boolean(data.result);
+      panel.hidden = !shouldShow;
+      if (!shouldShow) return;
+      const stats = buildPostRunStats(data);
+      renderMetricCards(stats);
+      renderBarChart("score-distribution-chart", stats.scoreDistribution, {scaleMax: 1, showPercent: true, colorByLabel: true});
+      renderBarChart("judge-failures-chart", stats.failuresByJudge, {scaleMax: 1, showPercent: true, tone: "bad"});
+      renderBarChart("arbitration-chart", stats.arbitrations, {scaleMax: 1, showPercent: true, tone: "arbiter"});
+      renderBarChart("candidate-average-chart", stats.averageByCandidate, {scaleMax: 5});
+      renderBarChart("judge-average-chart", stats.averageByJudge, {scaleMax: 5});
+    }
+
+    function buildPostRunStats(data) {
+      const events = data.evaluation_events || [];
+      const summary = data.result?.summary || {};
+      const scoredEvents = events.filter((event) => event.status === "success" && Number.isFinite(Number(event.score)));
+      const failedEvents = events.filter((event) => event.status === "failed");
+      const successCount = events.filter((event) => event.status === "success").length;
+      const scoreDistribution = [1, 2, 3, 4, 5].map((score) => ({
+        label: String(score),
+        value: scoredEvents.filter((event) => Number(event.score) === score).length
+      }));
+      const avgScore = average(scoredEvents.map((event) => Number(event.score)));
+      return {
+        selectedAnswers: summary.selected_answers ?? data.eligibility?.will_process ?? data.progress?.total ?? 0,
+        judgeCalls: events.filter((event) => event.status !== "skipped").length || summary.executed_evaluations || 0,
+        successCount,
+        failedCount: failedEvents.length,
+        arbiterCount: summary.arbiter_evaluations ?? data.progress?.arbiter_evaluations ?? 0,
+        averageScore: avgScore,
+        duration: data.duration || "-",
+        scoreDistribution,
+        failuresByJudge: countBy(failedEvents, (event) => event.judge_model || "sem juiz"),
+        arbitrations: [
+          {label: "acionadas", value: summary.arbiter_evaluations ?? data.progress?.arbiter_evaluations ?? 0},
+          {label: "sem arbitro", value: Math.max(0, (summary.selected_answers ?? data.progress?.total ?? 0) - (summary.arbiter_evaluations ?? data.progress?.arbiter_evaluations ?? 0))}
+        ],
+        averageByCandidate: averageBy(scoredEvents, (event) => event.candidate_model || "sem modelo"),
+        averageByJudge: averageBy(scoredEvents, (event) => event.judge_model || "sem juiz")
+      };
+    }
+
+    function renderMetricCards(stats) {
+      const root = document.getElementById("post-run-cards");
+      root.textContent = "";
+      for (const metric of [
+        ["Respostas selecionadas", stats.selectedAnswers],
+        ["Chamadas de juiz realizadas", stats.judgeCalls],
+        ["Success", stats.successCount],
+        ["Failed", stats.failedCount],
+        ["Arbitragens acionadas", stats.arbiterCount],
+        ["Nota media", formatAverage(stats.averageScore)],
+        ["Tempo total", stats.duration]
+      ]) {
+        const card = document.createElement("div");
+        card.className = "metric-card";
+        const value = document.createElement("span");
+        value.className = "metric-value";
+        value.textContent = display(metric[1]);
+        const label = document.createElement("span");
+        label.className = "metric-label";
+        label.textContent = metric[0];
+        card.appendChild(value);
+        card.appendChild(label);
+        root.appendChild(card);
+      }
+    }
+
+    function renderBarChart(id, rows, options = {}) {
+      const root = document.getElementById(id);
+      root.textContent = "";
+      const values = rows || [];
+      const total = values.reduce((sum, row) => sum + (Number(row.value) || 0), 0);
+      const max = Math.max(options.scaleMax || 0, ...values.map((row) => Number(row.value) || 0));
+      if (!values.length) {
+        const empty = document.createElement("div");
+        empty.className = "muted";
+        empty.textContent = "Sem dados.";
+        root.appendChild(empty);
+        return;
+      }
+      for (const row of values) {
+        const value = Number(row.value) || 0;
+        const line = document.createElement("div");
+        line.className = "bar-row";
+        const label = document.createElement("span");
+        label.className = "bar-label";
+        label.title = row.label;
+        label.textContent = row.label;
+        const track = document.createElement("span");
+        track.className = "bar-track";
+        const fill = document.createElement("span");
+        fill.className = "bar-fill";
+        if (value === 0) fill.classList.add("zero");
+        applyBarTone(fill, row, options);
+        const basis = options.showPercent ? total : max;
+        fill.style.width = `${basis ? Math.round((value / basis) * 100) : 0}%`;
+        track.appendChild(fill);
+        const number = document.createElement("span");
+        number.className = "bar-value";
+        const count = document.createElement("span");
+        count.className = `bar-count ${valueTone(value, row, options)}`;
+        count.style.setProperty("--pill-pct", `${max ? Math.round((value / max) * 100) : 0}%`);
+        count.textContent = Number.isInteger(value) ? String(value) : value.toFixed(1);
+        number.appendChild(count);
+        if (options.showPercent) {
+          const percent = document.createElement("span");
+          percent.className = "bar-percent";
+          percent.textContent = `(${total ? Math.round((value / total) * 100) : 0}%)`;
+          number.appendChild(percent);
+        }
+        line.appendChild(label);
+        line.appendChild(track);
+        line.appendChild(number);
+        root.appendChild(line);
+      }
+    }
+
+    function applyBarTone(fill, row, options) {
+      if (options.colorByLabel && ["1", "2", "3", "4", "5"].includes(String(row.label))) {
+        fill.classList.add(`score-${row.label}`);
+        return;
+      }
+      if (options.tone === "bad") fill.classList.add("failed");
+      else if (options.tone === "arbiter" && row.label === "acionadas") fill.classList.add("arbiter");
+      else if (options.tone === "arbiter") fill.classList.add("none");
+    }
+
+    function valueTone(value, row, options) {
+      if (!value) return "";
+      if (options.tone === "bad") return "bad";
+      if (options.tone === "arbiter" && row.label === "acionadas") return "warning";
+      if (options.colorByLabel && Number(row.label) <= 2) return "bad";
+      if (options.colorByLabel && Number(row.label) >= 4) return "positive";
+      return "";
+    }
+
+    function countBy(events, keyFn) {
+      const counts = new Map();
+      for (const event of events) counts.set(keyFn(event), (counts.get(keyFn(event)) || 0) + 1);
+      return Array.from(counts, ([label, value]) => ({label, value})).sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+    }
+
+    function averageBy(events, keyFn) {
+      const groups = new Map();
+      for (const event of events) {
+        const key = keyFn(event);
+        const current = groups.get(key) || {sum: 0, count: 0};
+        current.sum += Number(event.score);
+        current.count += 1;
+        groups.set(key, current);
+      }
+      return Array.from(groups, ([label, value]) => ({label, value: value.sum / value.count})).sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+    }
+
+    function average(values) {
+      if (!values.length) return null;
+      return values.reduce((sum, value) => sum + value, 0) / values.length;
+    }
+
+    function formatAverage(value) {
+      return value === null || value === undefined ? "-" : value.toFixed(1);
     }
 
     function renderExecutionTable(events) {
@@ -659,7 +1286,7 @@ _INDEX_HTML = """
           formatBoolean(event.arbiter_triggered),
           event.trigger_reason,
           formatLatency(event.latency_ms),
-          event.error
+          friendlyErrorMessage(event.error)
         ]) appendCell(row, display(value));
         const detailsCell = document.createElement("td");
         const button = document.createElement("button");
@@ -709,14 +1336,14 @@ _INDEX_HTML = """
       setText("details-title", `Detalhes da avaliacao #${index + 1} - resposta ${event.answer_id || "-"}`);
       setText("details-prompt", event.prompt || "-");
       setText("details-response", event.raw_response || "-");
-      setText("details-rationale", event.rationale || event.error || "-");
+      setText("details-rationale", event.rationale || friendlyErrorMessage(event.error) || "-");
       document.getElementById("details-dialog").showModal();
     }
 
     function renderStatusIcon(status) {
       const icon = document.getElementById("run-status-icon");
       icon.className = "status-icon";
-      if (["queued", "running"].includes(status)) {
+      if (["queued", "running", "cancelling"].includes(status)) {
         icon.textContent = "";
         icon.classList.add("spinner");
       } else if (status === "completed" || status === "dry-run") {
@@ -730,13 +1357,114 @@ _INDEX_HTML = """
       }
     }
 
+    function updateStopButton(runId, status) {
+      const button = document.getElementById("stop-run");
+      const canStop = Boolean(runId) && ["queued", "running", "cancelling"].includes(status);
+      button.disabled = !canStop || status === "cancelling";
+      button.textContent = status === "cancelling" ? "Parando..." : "Parar";
+      activeRunId = canStop ? runId : null;
+    }
+
     async function poll(runId) {
       const data = await (await fetch(`/api/runs/${runId}`)).json();
       renderRun(data);
-      if (["completed", "failed"].includes(data.status) && pollTimer) {
+      if (["completed", "failed", "cancelled"].includes(data.status) && pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
+        activeRunId = null;
       }
+    }
+
+    async function loadHistory() {
+      const response = await fetch("/api/run-history");
+      const data = await response.json();
+      renderHistory(data);
+      historyLoaded = true;
+    }
+
+    function renderHistory(rows) {
+      const body = document.getElementById("history-table-body");
+      body.textContent = "";
+      if (!rows.length) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 10;
+        cell.className = "muted";
+        cell.textContent = "Nenhuma execucao encontrada.";
+        row.appendChild(cell);
+        body.appendChild(row);
+        return;
+      }
+      rows.forEach((entry) => {
+        const row = document.createElement("tr");
+        row.className = "history-row";
+        row.onclick = () => openHistoryLog(entry);
+        for (const value of [
+          entry.run_id,
+          formatDateTime(entry.timestamp),
+          entry.mode,
+          entry.dataset,
+          entry.batch_size,
+          entry.successes,
+          entry.failures,
+          entry.duration
+        ]) appendCell(row, display(value));
+        const logCell = document.createElement("td");
+        const openButton = document.createElement("button");
+        openButton.type = "button";
+        openButton.className = "detail-button";
+        openButton.textContent = "Abrir";
+        openButton.onclick = (event) => {
+          event.stopPropagation();
+          openHistoryLog(entry);
+        };
+        logCell.appendChild(openButton);
+        row.appendChild(logCell);
+        const exportCell = document.createElement("td");
+        const links = document.createElement("span");
+        links.className = "history-export-links";
+        links.appendChild(historyExportLink("CSV", "/api/run-history/export.csv", "run-history.csv"));
+        links.appendChild(historyExportLink("JSON", "/api/run-history/export.json", "run-history.json"));
+        exportCell.appendChild(links);
+        row.appendChild(exportCell);
+        body.appendChild(row);
+      });
+    }
+
+    function historyExportLink(label, href, filename) {
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = filename;
+      link.textContent = label;
+      return link;
+    }
+
+    async function openHistoryLog(entry) {
+      setText("history-log-run-id", entry.run_id);
+      setText("history-log-path", entry.log_path);
+      setText("history-log-content", "Carregando log...");
+      try {
+        const response = await fetch(entry.log_url);
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.detail || "Log nao encontrado.");
+        }
+        setText("history-log-content", await response.text());
+      } catch (error) {
+        setText("history-log-content", friendlyErrorMessage(error.message));
+      }
+    }
+
+    function switchTab(targetId) {
+      for (const button of document.querySelectorAll(".tab-button")) {
+        const active = button.dataset.tab === targetId;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", String(active));
+      }
+      for (const panel of document.querySelectorAll(".tab-panel")) {
+        panel.hidden = panel.id !== targetId;
+      }
+      if (targetId === "history-panel" && !historyLoaded) loadHistory();
     }
 
     async function loadConfig() {
@@ -766,6 +1494,8 @@ _INDEX_HTML = """
         presetRoot.appendChild(btn);
       }
       renderEndpointFields();
+      document.getElementById("dry-run").disabled = false;
+      document.getElementById("run").disabled = false;
     }
 
     function copyEndpointValues(source, target) {
@@ -815,6 +1545,10 @@ _INDEX_HTML = """
       };
     }
     document.getElementById("details-close").onclick = () => document.getElementById("details-dialog").close();
+    document.getElementById("audit-log-close").onclick = () => document.getElementById("audit-log-dialog").close();
+    for (const button of document.querySelectorAll(".tab-button")) {
+      button.onclick = () => switchTab(button.dataset.tab);
+    }
 
     document.getElementById("dry-run").onclick = async () => {
       try {
@@ -822,19 +1556,29 @@ _INDEX_HTML = """
         renderRun({status:"dry-run", result:data, progress:{percent:100,current:0,total:0}});
       } catch (error) {
         setText("run-status", "failed");
-        setText("output", error.message);
+        setText("output", friendlyErrorMessage(error.message));
+      }
+    };
+    document.getElementById("stop-run").onclick = async () => {
+      if (!activeRunId) return;
+      try {
+        const data = await postJson(`/api/runs/${activeRunId}/cancel`, {});
+        renderRun(data);
+      } catch (error) {
+        setText("output", friendlyErrorMessage(error.message));
       }
     };
     document.getElementById("run").onclick = async () => {
       try {
         const data = await postJson("/api/runs", payload());
+        activeRunId = data.run_id;
         renderRun(data);
         if (pollTimer) clearInterval(pollTimer);
         pollTimer = setInterval(() => poll(data.run_id), 1000);
         await poll(data.run_id);
       } catch (error) {
         setText("run-status", "failed");
-        setText("output", error.message);
+        setText("output", friendlyErrorMessage(error.message));
       }
     };
     loadConfig();
