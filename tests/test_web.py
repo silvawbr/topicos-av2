@@ -7,7 +7,9 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
+from atividade_2.database_dump import DatabaseDumpResult
 from atividade_2.contracts import BatchProgress, EligibilitySummary, EvaluationProgress, PipelineSummary
+from atividade_2.dashboard import DashboardFilters
 from atividade_2.run_judge_service import RunJudgeResult
 from atividade_2.web import create_app
 
@@ -148,12 +150,91 @@ class BlockingRunJudgeService(FakeRunJudgeService):
         )
 
 
+class FakeDashboardService:
+    def __init__(self) -> None:
+        self.filters: list[DashboardFilters] = []
+
+    def load(self, filters: DashboardFilters) -> dict:
+        self.filters.append(filters)
+        return {
+            "filters": {"dataset": filters.dataset},
+            "options": {
+                "candidate_models": ["modelo-candidato"],
+                "judge_models": ["openai/gpt-oss-120b"],
+            },
+            "cards": {
+                "evaluations": 4,
+                "coverage": {"evaluated": 2, "expected": 3, "percent": 66.7},
+                "success_rate": 100.0,
+                "average_score": 4.25,
+                "spearman_reference": {
+                    "value": None,
+                    "sample_size": 0,
+                    "available": False,
+                    "note": "J1 não possui nota humana/rubrica ordinal persistida.",
+                },
+                "judge_arbiter_consistency": {
+                    "value": 1.0,
+                    "sample_size": 2,
+                    "available": True,
+                    "note": "Meta-avaliação complementar.",
+                },
+                "critical_failures": 1,
+                "audit_divergences": 1,
+            },
+            "charts": {
+                "candidate_ranking": [{"label": "modelo-candidato", "value": 4.25}],
+                "score_distribution": [{"label": str(score), "value": 1 if score == 5 else 0} for score in range(1, 6)],
+                "judge_average": [{"label": "openai/gpt-oss-120b", "value": 4.25}],
+                "divergences": [{"label": "modelo-candidato", "value": 1}],
+                "critical_cases": [{"label": "nota 1", "value": 1}],
+            },
+            "tables": {
+                "critical_cases": [
+                    {
+                        "reason": "nota 1",
+                        "dataset": "J1",
+                        "answer_id": 10,
+                        "question_id": 20,
+                        "candidate_model": "modelo-candidato",
+                        "judge_model": "openai/gpt-oss-120b",
+                        "role": "principal",
+                        "score": 1,
+                        "status": "success",
+                    }
+                ],
+                "divergence_cases": [],
+            },
+            "methodology": {"primary_spearman": "metodologia principal", "judge_arbiter": "consistencia"},
+        }
+
+
+class FakeDumpService:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def create_dump(self) -> DatabaseDumpResult:
+        self.calls += 1
+        return DatabaseDumpResult(
+            filename="atividade_2_20260430_120000.sql",
+            path="outputs/backup/atividade_2_20260430_120000.sql",
+            size_bytes=2048,
+            created_at="2026-04-30T12:00:00",
+            download_url="/api/database-dumps/atividade_2_20260430_120000.sql",
+        )
+
+
 def test_web_index_contains_progress_element() -> None:
     client = TestClient(create_app(FakeRunJudgeService()))
 
     response = client.get("/")
 
     assert response.status_code == 200
+    assert 'data-tab="dashboard-panel">Dashboard</button>' in response.text
+    assert '<main id="dashboard-panel" class="dashboard-layout tab-panel">' in response.text
+    assert '<main id="execution-panel" class="tab-panel" hidden>' in response.text
+    assert "Resultados e Auditoria da Avaliacao" in response.text
+    assert 'id="database-dump" type="button">Exportar dump do banco</button>' in response.text
     assert '<progress id="batch-progress"' in response.text
     assert 'id="eligible-missing"' in response.text
     assert 'id="execution-table-body"' in response.text
@@ -213,6 +294,53 @@ def test_config_endpoint_is_secret_safe_and_returns_csrf_token() -> None:
     assert data["csrf_token"]
     assert data["endpoints"]["JUDGE"]["host"] == "example.invalid"
     assert "secret" not in response.text.lower()
+
+
+def test_dashboard_endpoint_returns_filtered_audit_payload() -> None:
+    dashboard = FakeDashboardService()
+    client = TestClient(create_app(FakeRunJudgeService(), dashboard_service=dashboard))
+
+    response = client.get("/api/dashboard?dataset=J2&candidate_model=modelo-candidato&status=sucesso")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["cards"]["evaluations"] == 4
+    assert data["cards"]["spearman_reference"]["available"] is False
+    assert dashboard.filters[0].dataset == "J2"
+    assert dashboard.filters[0].candidate_models == ("modelo-candidato",)
+    assert dashboard.filters[0].status == "sucesso"
+
+
+def test_database_dump_endpoint_requires_csrf_token() -> None:
+    dump_service = FakeDumpService()
+    client = TestClient(create_app(FakeRunJudgeService(), dump_service=dump_service))
+
+    response = client.post("/api/database-dumps", json={})
+
+    assert response.status_code == 403
+    assert dump_service.calls == 0
+
+
+def test_database_dump_endpoint_returns_download_metadata() -> None:
+    dump_service = FakeDumpService()
+    client = TestClient(create_app(FakeRunJudgeService(), dump_service=dump_service))
+    token = client.get("/api/config").json()["csrf_token"]
+
+    response = client.post("/api/database-dumps", headers={"x-csrf-token": token}, json={})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["filename"] == "atividade_2_20260430_120000.sql"
+    assert data["download_url"] == "/api/database-dumps/atividade_2_20260430_120000.sql"
+    assert dump_service.calls == 1
+
+
+def test_database_dump_download_rejects_path_traversal(tmp_path) -> None:
+    client = TestClient(create_app(FakeRunJudgeService(), backup_dir=tmp_path))
+
+    response = client.get("/api/database-dumps/../secret.sql")
+
+    assert response.status_code in {400, 404}
 
 
 def test_mutating_endpoint_requires_csrf_token() -> None:
