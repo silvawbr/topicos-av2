@@ -6,14 +6,15 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
-from atividade_2.contracts import BatchProgress, PipelineSummary
+from atividade_2.contracts import BatchProgress, EligibilitySummary, PipelineSummary
 from atividade_2.run_judge_service import RunJudgeResult
 from atividade_2.web import create_app
 
 
 class FakeRunJudgeService:
-    def __init__(self) -> None:
+    def __init__(self, audit_path: str = "outputs/audit/test.log") -> None:
         self.requests = []
+        self.audit_path = audit_path
 
     def describe_config(self) -> dict:
         return {
@@ -41,12 +42,15 @@ class FakeRunJudgeService:
 
     def resolve(self, request):
         return SimpleNamespace(
-            audit_path=Path("outputs/audit/test.log"),
+            audit_path=Path(self.audit_path),
             command_preview=".venv/bin/python -m atividade_2.cli run-judge --dataset J2",
         )
 
-    def run(self, request, *, progress_callback=None, on_resolved=None):
+    def run(self, request, *, progress_callback=None, on_resolved=None, eligibility_callback=None):
         self.requests.append(request)
+        eligibility = EligibilitySummary(missing=83, failed=7, successful=240, batch_size=1, will_process=1)
+        if eligibility_callback is not None and not request.dry_run:
+            eligibility_callback(eligibility)
         if progress_callback is not None:
             progress_callback(
                 BatchProgress(
@@ -60,10 +64,11 @@ class FakeRunJudgeService:
             )
         return RunJudgeResult(
             dry_run=request.dry_run,
-            audit_log="outputs/audit/test.log",
+            audit_log=self.audit_path,
             execution_summary="Judge mode: single",
             command_preview=".venv/bin/python -m atividade_2.cli run-judge --dataset J2",
             batch_size=1,
+            eligibility=None if request.dry_run else eligibility,
             summary=None
             if request.dry_run
             else PipelineSummary(
@@ -81,10 +86,15 @@ class BlockingRunJudgeService(FakeRunJudgeService):
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def run(self, request, *, progress_callback=None, on_resolved=None):
+    def run(self, request, *, progress_callback=None, on_resolved=None, eligibility_callback=None):
         self.started.set()
         self.release.wait(timeout=2)
-        return super().run(request, progress_callback=progress_callback, on_resolved=on_resolved)
+        return super().run(
+            request,
+            progress_callback=progress_callback,
+            on_resolved=on_resolved,
+            eligibility_callback=eligibility_callback,
+        )
 
 
 def test_web_index_contains_progress_element() -> None:
@@ -94,6 +104,7 @@ def test_web_index_contains_progress_element() -> None:
 
     assert response.status_code == 200
     assert '<progress id="batch-progress"' in response.text
+    assert 'id="eligible-missing"' in response.text
     assert "/api/runs/" in response.text
 
 
@@ -215,7 +226,31 @@ def test_run_lifecycle_exposes_batch_progress() -> None:
     assert current.status_code == 200
     data = current.json()
     assert data["progress"]["percent"] == 100
+    assert data["eligibility"]["missing"] == 83
+    assert data["eligibility"]["failed"] == 7
+    assert data["eligibility"]["successful"] == 240
+    assert data["eligibility"]["will_process"] == 1
     assert data["result"]["summary"]["executed_evaluations"] == 1
+
+
+def test_run_exposes_audit_log_link_and_file_content(tmp_path) -> None:
+    audit_path = tmp_path / "judge.log"
+    audit_path.write_text("audit content\n", encoding="utf-8")
+    client = TestClient(create_app(FakeRunJudgeService(str(audit_path))))
+    token = client.get("/api/config").json()["csrf_token"]
+
+    created = client.post(
+        "/api/runs",
+        headers={"x-csrf-token": token},
+        json={"panel_mode": "single", "dataset": "J2", "batch_size": 1},
+    )
+
+    data = created.json()
+    assert data["audit_log"] == str(audit_path)
+    assert data["audit_log_url"] == f"/api/runs/{data['run_id']}/audit-log"
+    log_response = client.get(data["audit_log_url"])
+    assert log_response.status_code == 200
+    assert log_response.text == "audit content\n"
 
 
 def test_second_run_is_rejected_while_one_is_active() -> None:

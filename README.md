@@ -148,6 +148,8 @@ make web-logs
 make web-down
 ```
 
+`make web-up` libera automaticamente a porta configurada em `WEB_PORT` antes de subir a Web UI: para containers Docker que publicam essa porta, executa `docker stop`; para processos locais escutando na porta, tenta `SIGTERM` e depois `SIGKILL` se necessário.
+
 ### Configuração rápida
 
 Se ainda não existe `.env`:

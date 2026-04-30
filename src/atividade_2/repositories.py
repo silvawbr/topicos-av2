@@ -6,7 +6,7 @@ import json
 from collections.abc import Iterable
 from typing import Any, Protocol
 
-from .contracts import CandidateAnswerContext, EvaluationRecord, ModelSpec, StoredJudgeRole
+from .contracts import CandidateAnswerContext, EligibilitySummary, EvaluationRecord, ModelSpec, StoredJudgeRole
 
 DATASET_ALIASES = {
     "J1": "OAB_Bench",
@@ -46,6 +46,15 @@ class JudgeRepositoryProtocol(Protocol):
         required_evaluations: Iterable[tuple[ModelSpec, StoredJudgeRole, str]],
     ) -> list[CandidateAnswerContext]:
         """Select AV1 answers still missing at least one required successful evaluation."""
+
+    def summarize_eligibility(
+        self,
+        *,
+        dataset: str,
+        batch_size: int,
+        required_evaluations: Iterable[tuple[ModelSpec, StoredJudgeRole, str]],
+    ) -> EligibilitySummary:
+        """Count answer-level eligibility before selecting the execution batch."""
 
 
 class JudgeRepository:
@@ -185,6 +194,91 @@ class JudgeRepository:
             )
             for row in rows
         ]
+
+    def summarize_eligibility(
+        self,
+        *,
+        dataset: str,
+        batch_size: int,
+        required_evaluations: Iterable[tuple[ModelSpec, StoredJudgeRole, str]],
+    ) -> EligibilitySummary:
+        """Count missing, failed, successful, and next-batch answer totals."""
+        required = tuple(required_evaluations)
+        if not required:
+            return EligibilitySummary(missing=0, failed=0, successful=0, batch_size=batch_size, will_process=0)
+
+        model_ids = [self.ensure_judge_model(model) for model, _, _ in required]
+        values_sql = ", ".join(["(%s, %s, %s)"] * len(required))
+        required_params: list[Any] = []
+        for model_id, (_, role, panel_mode) in zip(model_ids, required, strict=True):
+            required_params.extend([model_id, role, f"{panel_mode}:%"])
+
+        dataset_name = DATASET_ALIASES.get(dataset.upper(), dataset)
+        params: list[Any] = [*required_params, dataset_name, len(required)]
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                WITH required_evaluations(id_modelo_juiz, papel_juiz, motivo_pattern) AS (
+                    VALUES {values_sql}
+                ),
+                answer_required_status AS (
+                    SELECT
+                        r.id_resposta,
+                        required.id_modelo_juiz,
+                        required.papel_juiz,
+                        required.motivo_pattern,
+                        BOOL_OR(
+                            a.id_avaliacao IS NOT NULL
+                            AND COALESCE(a.status_avaliacao, 'success') = 'success'
+                        ) AS has_success,
+                        BOOL_OR(
+                            a.id_avaliacao IS NOT NULL
+                            AND COALESCE(a.status_avaliacao, 'success') <> 'success'
+                        ) AS has_failure
+                    FROM respostas_atividade_1 r
+                    JOIN perguntas p ON p.id_pergunta = r.id_pergunta
+                    JOIN datasets d ON d.id_dataset = p.id_dataset
+                    CROSS JOIN required_evaluations required
+                    LEFT JOIN avaliacoes_juiz a
+                      ON a.id_resposta_ativa1 = r.id_resposta
+                     AND a.id_modelo_juiz = required.id_modelo_juiz
+                     AND COALESCE(a.papel_juiz, '') = required.papel_juiz
+                     AND COALESCE(a.motivo_acionamento, '') LIKE required.motivo_pattern
+                    WHERE d.nome_dataset = %s
+                    GROUP BY
+                        r.id_resposta,
+                        required.id_modelo_juiz,
+                        required.papel_juiz,
+                        required.motivo_pattern
+                ),
+                answer_status AS (
+                    SELECT
+                        id_resposta,
+                        COUNT(*) FILTER (WHERE has_success) AS successful_required,
+                        COUNT(*) FILTER (WHERE NOT has_success AND has_failure) AS failed_required
+                    FROM answer_required_status
+                    GROUP BY id_resposta
+                )
+                SELECT
+                    COUNT(*) FILTER (WHERE successful_required = %s) AS successful,
+                    COUNT(*) FILTER (WHERE successful_required < %s AND failed_required > 0) AS failed,
+                    COUNT(*) FILTER (WHERE successful_required < %s AND failed_required = 0) AS missing
+                FROM answer_status;
+                """,
+                [*params, len(required), len(required)],
+            )
+            row = cursor.fetchone()
+
+        successful = int(row[0] or 0)
+        failed = int(row[1] or 0)
+        missing = int(row[2] or 0)
+        return EligibilitySummary(
+            missing=missing,
+            failed=failed,
+            successful=successful,
+            batch_size=batch_size,
+            will_process=min(batch_size, missing + failed),
+        )
 
     def evaluation_exists(
         self,
@@ -348,3 +442,12 @@ class InMemoryJudgeRepository:
         required_evaluations: Iterable[tuple[ModelSpec, StoredJudgeRole, str]],
     ) -> list[CandidateAnswerContext]:
         return []
+
+    def summarize_eligibility(
+        self,
+        *,
+        dataset: str,
+        batch_size: int,
+        required_evaluations: Iterable[tuple[ModelSpec, StoredJudgeRole, str]],
+    ) -> EligibilitySummary:
+        return EligibilitySummary(missing=0, failed=0, successful=0, batch_size=batch_size, will_process=0)

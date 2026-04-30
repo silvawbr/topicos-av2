@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from atividade_2.config import load_settings
+from atividade_2.contracts import CandidateAnswerContext, EligibilitySummary, JudgeRawResponse
+from atividade_2.repositories import InMemoryJudgeRepository
 from atividade_2.run_judge_service import RunJudgeRequest, RunJudgeService
 
 
@@ -11,6 +13,47 @@ BASE_ENV = {
     "REMOTE_SECONDARY_JUDGE_MODEL": "llama-3.3-70b-instruct",
     "REMOTE_ARBITER_JUDGE_MODEL": "m-prometheus-14b",
 }
+
+
+class FakeConnection:
+    def close(self) -> None:
+        return None
+
+
+class EligibilityRepository(InMemoryJudgeRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.eligibility_calls = 0
+
+    def ensure_schema(self) -> None:
+        return None
+
+    def select_pending_candidate_answers(self, *, dataset, batch_size, required_evaluations):
+        return [
+            CandidateAnswerContext(
+                answer_id=1,
+                question_id=1,
+                dataset_name="OAB_Exames",
+                question_text="Enunciado",
+                reference_answer="Resposta ouro",
+                candidate_answer="Resposta candidata",
+                candidate_model="modelo",
+            )
+        ]
+
+    def summarize_eligibility(self, *, dataset, batch_size, required_evaluations):
+        self.eligibility_calls += 1
+        if self.eligibility_calls == 1:
+            return EligibilitySummary(missing=1, failed=0, successful=8, batch_size=batch_size, will_process=1)
+        return EligibilitySummary(missing=0, failed=0, successful=9, batch_size=batch_size, will_process=0)
+
+
+class FakeClient:
+    def __init__(self, settings) -> None:
+        return None
+
+    def judge(self, prompt: str, model: str, *, requested_model: str | None = None, endpoint_key: str | None = None):
+        return JudgeRawResponse(text='{"score": 5, "rationale": "ok"}', provider="fake", model=model, latency_ms=1)
 
 
 def test_dry_run_does_not_connect_to_database(tmp_path) -> None:
@@ -106,3 +149,42 @@ def test_endpoint_override_requires_url_and_key_together() -> None:
         assert "Both URL and token/key are required" in str(error)
     else:
         raise AssertionError("incomplete endpoint override should fail")
+
+
+def test_real_run_emits_initial_and_final_eligibility_counts(tmp_path) -> None:
+    repository = EligibilityRepository()
+    eligibility_events: list[EligibilitySummary] = []
+    service = RunJudgeService(
+        settings_loader=lambda: load_settings(dotenv_path=None, env=BASE_ENV),
+        connect_func=lambda database_url: FakeConnection(),
+        repository_factory=lambda connection: repository,
+        client_factory=FakeClient,
+    )
+
+    result = service.run(
+        RunJudgeRequest(
+            panel_mode="single",
+            batch_size=1,
+            audit_log=str(tmp_path / "run.log"),
+            no_audit_animation=True,
+        ),
+        eligibility_callback=eligibility_events.append,
+    )
+
+    assert result.summary is not None
+    assert result.summary.executed_evaluations == 1
+    assert eligibility_events[0] == EligibilitySummary(
+        missing=1,
+        failed=0,
+        successful=8,
+        batch_size=1,
+        will_process=1,
+    )
+    assert eligibility_events[-1] == EligibilitySummary(
+        missing=0,
+        failed=0,
+        successful=9,
+        batch_size=1,
+        will_process=0,
+    )
+    assert result.eligibility == eligibility_events[-1]

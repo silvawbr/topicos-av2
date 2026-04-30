@@ -139,6 +139,17 @@ class PipelineSummary:
 
 
 @dataclass(frozen=True)
+class EligibilitySummary:
+    """Answer-level eligibility counts before batch execution."""
+
+    missing: int
+    failed: int
+    successful: int
+    batch_size: int
+    will_process: int
+
+
+@dataclass(frozen=True)
 class BatchProgress:
     """Structured batch progress for terminal, audit logs, and web UIs."""
 

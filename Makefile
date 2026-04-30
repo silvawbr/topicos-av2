@@ -49,7 +49,7 @@ db-backup:
 	./scripts/db_backup.sh
 
 web-up: db-up
-	docker compose --env-file .env up -d judge-web
+	./scripts/web_up.sh
 
 web-down:
 	docker compose --env-file .env stop judge-web

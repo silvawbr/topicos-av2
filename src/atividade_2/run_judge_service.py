@@ -15,6 +15,7 @@ from .audit import AuditLogger
 from .config import ConfigurationError, load_settings, resolve_runtime_config
 from .contracts import (
     BatchProgress,
+    EligibilitySummary,
     JudgeSettings,
     ModelSpec,
     PipelineSummary,
@@ -79,6 +80,7 @@ class RunJudgeResult:
     execution_summary: str
     command_preview: str
     batch_size: int
+    eligibility: EligibilitySummary | None = None
     summary: PipelineSummary | None = None
 
 
@@ -171,6 +173,7 @@ class RunJudgeService:
         *,
         on_resolved: Callable[[ResolvedRun], None] | None = None,
         progress_callback: Callable[[BatchProgress], None] | None = None,
+        eligibility_callback: Callable[[EligibilitySummary], None] | None = None,
     ) -> RunJudgeResult:
         """Run or dry-run the judge pipeline."""
         audit_path = _resolve_audit_path(request.audit_log)
@@ -219,6 +222,30 @@ class RunJudgeService:
                 repository = self._repository_factory(connection)
                 with audit.step("Ensuring judge metadata schema"):
                     repository.ensure_schema()
+                required_evaluations = _required_evaluations(runtime_config)
+                with audit.step(
+                    f"Counting eligible answers for {request.dataset}",
+                    detail=f"dataset={request.dataset} batch_size={resolved.batch_size}",
+                ):
+                    eligibility = repository.summarize_eligibility(
+                        dataset=request.dataset,
+                        batch_size=resolved.batch_size,
+                        required_evaluations=required_evaluations,
+                    )
+                audit.terminal_event(
+                    "Respostas elegiveis: "
+                    f"missing={eligibility.missing} failed={eligibility.failed} "
+                    f"success={eligibility.successful} batch={eligibility.will_process}"
+                )
+                if eligibility_callback is not None:
+                    _safe_emit_eligibility(audit, eligibility_callback, eligibility)
+                audit.file_event(
+                    "eligibility_summary",
+                    (
+                        f"missing={eligibility.missing} failed={eligibility.failed} "
+                        f"successful={eligibility.successful} will_process={eligibility.will_process}"
+                    ),
+                )
                 with audit.step(
                     f"Selecting pending candidate answers for {request.dataset}",
                     detail=f"dataset={request.dataset} batch_size={resolved.batch_size}",
@@ -226,10 +253,35 @@ class RunJudgeService:
                     answers = repository.select_pending_candidate_answers(
                         dataset=request.dataset,
                         batch_size=resolved.batch_size,
-                        required_evaluations=_required_evaluations(runtime_config),
+                        required_evaluations=required_evaluations,
                     )
                 audit.file_event("answers_selected", f"count={len(answers)}")
                 client = self._client_factory(settings)
+                reported_eligibility = eligibility
+
+                def report_progress(progress: BatchProgress) -> None:
+                    nonlocal reported_eligibility
+                    if progress_callback is not None:
+                        try:
+                            progress_callback(progress)
+                        except Exception as error:
+                            audit.file_event("batch_progress_callback_failed", f"error={error}")
+                    refreshed = repository.summarize_eligibility(
+                        dataset=request.dataset,
+                        batch_size=resolved.batch_size,
+                        required_evaluations=required_evaluations,
+                    )
+                    reported_eligibility = refreshed
+                    if eligibility_callback is not None:
+                        _safe_emit_eligibility(audit, eligibility_callback, refreshed)
+                    audit.file_event(
+                        "eligibility_progress",
+                        (
+                            f"missing={refreshed.missing} failed={refreshed.failed} "
+                            f"successful={refreshed.successful} will_process={refreshed.will_process}"
+                        ),
+                    )
+
                 with audit.step(
                     "Running judge pipeline",
                     detail=f"answers={len(answers)} mode={runtime_config.panel_mode}",
@@ -238,8 +290,22 @@ class RunJudgeService:
                         repository,
                         client,
                         audit=audit,
-                        progress_callback=progress_callback,
+                        progress_callback=report_progress,
                     ).run(answers, runtime_config)
+                eligibility = repository.summarize_eligibility(
+                    dataset=request.dataset,
+                    batch_size=resolved.batch_size,
+                    required_evaluations=required_evaluations,
+                )
+                if eligibility != reported_eligibility and eligibility_callback is not None:
+                    _safe_emit_eligibility(audit, eligibility_callback, eligibility)
+                audit.file_event(
+                    "eligibility_final",
+                    (
+                        f"missing={eligibility.missing} failed={eligibility.failed} "
+                        f"successful={eligibility.successful} will_process={eligibility.will_process}"
+                    ),
+                )
             finally:
                 with audit.step("Closing PostgreSQL connection"):
                     connection.close()
@@ -251,7 +317,7 @@ class RunJudgeService:
                     f"skipped={summary.skipped_evaluations} arbiters={summary.arbiter_evaluations}"
                 ),
             )
-            return _result(request, resolved, summary)
+            return _result(request, resolved, summary, eligibility)
 
 
 def format_execution_summary(config: RuntimeJudgeConfig) -> str:
@@ -336,6 +402,7 @@ def _result(
     request: RunJudgeRequest,
     resolved: ResolvedRun,
     summary: PipelineSummary | None,
+    eligibility: EligibilitySummary | None = None,
 ) -> RunJudgeResult:
     return RunJudgeResult(
         dry_run=request.dry_run,
@@ -343,8 +410,20 @@ def _result(
         execution_summary=resolved.execution_summary,
         command_preview=resolved.command_preview,
         batch_size=resolved.batch_size,
+        eligibility=eligibility,
         summary=summary,
     )
+
+
+def _safe_emit_eligibility(
+    audit: AuditLogger,
+    eligibility_callback: Callable[[EligibilitySummary], None],
+    eligibility: EligibilitySummary,
+) -> None:
+    try:
+        eligibility_callback(eligibility)
+    except Exception as error:
+        audit.file_event("eligibility_callback_failed", f"error={error}")
 
 
 def _required_evaluations(config: RuntimeJudgeConfig) -> tuple[tuple[ModelSpec, StoredJudgeRole, str], ...]:

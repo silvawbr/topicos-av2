@@ -6,14 +6,15 @@ import secrets
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .config import ConfigurationError
-from .contracts import BatchProgress, PipelineSummary
+from .contracts import BatchProgress, EligibilitySummary, PipelineSummary
 from .judge_clients.remote_http import RemoteJudgeError
 from .parser import JudgeParseError
 from .run_judge_service import RunJudgeRequest, RunJudgeResult, RunJudgeService
@@ -83,6 +84,7 @@ class JobState:
     error: str | None = None
     audit_log: str | None = None
     command_preview: str | None = None
+    eligibility: EligibilitySummary | None = None
 
 
 class JobRegistry:
@@ -127,8 +129,16 @@ class JobRegistry:
             with self._lock:
                 self._jobs[run_id].progress = progress
 
+        def update_eligibility(eligibility: EligibilitySummary) -> None:
+            with self._lock:
+                self._jobs[run_id].eligibility = eligibility
+
         try:
-            result = self.service.run(job.request, progress_callback=update_progress)
+            result = self.service.run(
+                job.request,
+                progress_callback=update_progress,
+                eligibility_callback=update_eligibility,
+            )
         except (ConfigurationError, RemoteJudgeError, JudgeParseError, RuntimeError, ValueError) as error:
             with self._lock:
                 job = self._jobs[run_id]
@@ -141,6 +151,7 @@ class JobRegistry:
                 job.result = result
                 job.audit_log = result.audit_log
                 job.command_preview = result.command_preview
+                job.eligibility = result.eligibility
         finally:
             with self._lock:
                 if self._active_run_id == run_id:
@@ -188,6 +199,19 @@ def create_app(service: RunJudgeService | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Run not found.")
         return _serialize_job(job)
 
+    @app.get("/api/runs/{run_id}/audit-log", response_class=PlainTextResponse)
+    def get_audit_log(run_id: str, request: Request) -> str:
+        registry: JobRegistry = request.app.state.jobs
+        job = registry.get(run_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Run not found.")
+        if not job.audit_log:
+            raise HTTPException(status_code=404, detail="Audit log not available.")
+        audit_path = Path(job.audit_log)
+        if not audit_path.exists() or not audit_path.is_file():
+            raise HTTPException(status_code=404, detail="Audit log file not found.")
+        return audit_path.read_text(encoding="utf-8")
+
     return app
 
 
@@ -203,7 +227,9 @@ def _serialize_job(job: JobState) -> dict:
         "status": job.status,
         "progress": asdict(job.progress),
         "audit_log": job.audit_log,
+        "audit_log_url": f"/api/runs/{job.run_id}/audit-log" if job.audit_log else None,
         "command_preview": job.command_preview,
+        "eligibility": asdict(job.eligibility) if job.eligibility is not None else None,
         "error": job.error,
         "result": _serialize_result(job.result) if job.result is not None else None,
     }
@@ -216,6 +242,7 @@ def _serialize_result(result: RunJudgeResult) -> dict:
         "execution_summary": result.execution_summary,
         "command_preview": result.command_preview,
         "batch_size": result.batch_size,
+        "eligibility": asdict(result.eligibility) if result.eligibility is not None else None,
         "summary": _serialize_summary(result.summary),
     }
 
@@ -412,6 +439,10 @@ _INDEX_HTML = """
         <tbody>
           <tr><th>Status</th><td><span id="run-status-icon" class="status-icon">-</span><span id="run-status">idle</span></td></tr>
           <tr><th>Audit log</th><td id="audit-log" class="muted">-</td></tr>
+          <tr><th>Missing</th><td id="eligible-missing">-</td></tr>
+          <tr><th>Failed</th><td id="eligible-failed">-</td></tr>
+          <tr><th>Ja avaliadas com sucesso</th><td id="eligible-successful">-</td></tr>
+          <tr><th>Serao processadas neste batch</th><td id="eligible-will-process">-</td></tr>
           <tr><th>Selecionadas</th><td id="selected">-</td></tr>
           <tr><th>Executadas</th><td id="executed">-</td></tr>
           <tr><th>Puladas</th><td id="skipped">-</td></tr>
@@ -430,6 +461,22 @@ _INDEX_HTML = """
 
     function value(id) { return document.getElementById(id).value; }
     function setText(id, text) { document.getElementById(id).textContent = text ?? "-"; }
+
+    function renderAuditLog(data) {
+      const cell = document.getElementById("audit-log");
+      const path = data.audit_log || data.result?.audit_log || "-";
+      cell.textContent = "";
+      if (data.audit_log_url) {
+        const link = document.createElement("a");
+        link.href = data.audit_log_url;
+        link.target = "_blank";
+        link.rel = "noopener";
+        link.textContent = path;
+        cell.appendChild(link);
+        return;
+      }
+      cell.textContent = path;
+    }
 
     function payload() {
       applyEndpointSources();
@@ -484,9 +531,14 @@ _INDEX_HTML = """
       const status = data.status || "dry-run";
       setText("run-status", status);
       renderStatusIcon(status);
-      setText("audit-log", data.audit_log || data.result?.audit_log || "-");
+      renderAuditLog(data);
       setText("command-preview", data.command_preview || data.result?.command_preview || "");
       renderProgress(data.progress);
+      const eligibility = data.eligibility || data.result?.eligibility;
+      setText("eligible-missing", eligibility?.missing);
+      setText("eligible-failed", eligibility?.failed);
+      setText("eligible-successful", eligibility?.successful);
+      setText("eligible-will-process", eligibility?.will_process);
       const summary = data.result?.summary;
       setText("selected", summary?.selected_answers);
       setText("executed", summary?.executed_evaluations ?? data.progress?.executed_evaluations);
