@@ -15,11 +15,13 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 from .config import ConfigurationError
 from .contracts import BatchProgress, EligibilitySummary, EvaluationProgress, PipelineSummary
+from .dashboard import DashboardService, parse_dashboard_filters
+from .database_dump import DatabaseDumpService, resolve_dump_path
 from .judge_clients.remote_http import RemoteJudgeError
 from .parser import JudgeParseError
 from .run_judge_service import RunJudgeRequest, RunJudgeResult, RunJudgeService
@@ -30,6 +32,7 @@ RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 AUDIT_TIMESTAMP_PATTERN = re.compile(r"^([^|]+)\s+\|\s+([^|]+)(?:\s+\|\s+(.*))?$")
 AUDIT_KEY_VALUE_PATTERN = re.compile(r"([A-Za-z_]+)=([^ ]+)")
 DEFAULT_AUDIT_DIR = Path("outputs") / "audit"
+DEFAULT_BACKUP_DIR = Path("outputs") / "backup"
 
 
 class RunPayload(BaseModel):
@@ -216,11 +219,21 @@ class JobRegistry:
                     self._active_run_id = None
 
 
-def create_app(service: RunJudgeService | None = None, *, audit_dir: Path | str = DEFAULT_AUDIT_DIR) -> FastAPI:
+def create_app(
+    service: RunJudgeService | None = None,
+    *,
+    audit_dir: Path | str = DEFAULT_AUDIT_DIR,
+    backup_dir: Path | str = DEFAULT_BACKUP_DIR,
+    dashboard_service: DashboardService | None = None,
+    dump_service: DatabaseDumpService | None = None,
+) -> FastAPI:
     app = FastAPI(title="Atividade 2 Judge Console")
     app.state.csrf_token = secrets.token_urlsafe(32)
     app.state.jobs = JobRegistry(service or RunJudgeService())
     app.state.audit_dir = Path(audit_dir)
+    app.state.backup_dir = Path(backup_dir)
+    app.state.dashboard = dashboard_service or DashboardService()
+    app.state.dump_service = dump_service or DatabaseDumpService(output_dir=backup_dir)
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -231,6 +244,26 @@ def create_app(service: RunJudgeService | None = None, *, audit_dir: Path | str 
         config = request.app.state.jobs.service.describe_config()
         config["csrf_token"] = request.app.state.csrf_token
         return config
+
+    @app.get("/api/dashboard")
+    def get_dashboard(request: Request) -> dict:
+        try:
+            filters = parse_dashboard_filters(
+                {
+                    "dataset": request.query_params.get("dataset"),
+                    "candidate_model": request.query_params.get("candidate_model"),
+                    "judge_model": request.query_params.get("judge_model"),
+                    "status": request.query_params.get("status"),
+                    "date_from": request.query_params.get("date_from"),
+                    "date_to": request.query_params.get("date_to"),
+                    "group_by": request.query_params.get("group_by"),
+                }
+            )
+            return request.app.state.dashboard.load(filters)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
 
     @app.post("/api/runs/dry-run", dependencies=[Depends(_require_csrf)])
     def dry_run(payload: RunPayload, request: Request) -> dict:
@@ -314,6 +347,28 @@ def create_app(service: RunJudgeService | None = None, *, audit_dir: Path | str 
         if not audit_path.exists() or not audit_path.is_file():
             raise HTTPException(status_code=404, detail="Audit log file not found.")
         return audit_path.read_text(encoding="utf-8")
+
+    @app.post("/api/database-dumps", dependencies=[Depends(_require_csrf)])
+    def create_database_dump(request: Request) -> dict:
+        try:
+            result = request.app.state.dump_service.create_dump()
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return asdict(result)
+
+    @app.get("/api/database-dumps/{filename}")
+    def download_database_dump(filename: str, request: Request) -> FileResponse:
+        try:
+            dump_path = resolve_dump_path(request.app.state.backup_dir, filename)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if not dump_path.exists() or not dump_path.is_file():
+            raise HTTPException(status_code=404, detail="Database dump file not found.")
+        return FileResponse(
+            dump_path,
+            media_type="application/sql; charset=utf-8",
+            filename=filename,
+        )
 
     return app
 
@@ -617,6 +672,16 @@ _INDEX_HTML = """
     .audit-log-button-icon { font-size:15px; line-height:1; }
     .audit-log-button:disabled { color:var(--muted); }
     .audit-log-content { min-height:420px; max-height:calc(100vh - 210px); margin:0; overflow:auto; }
+    .dashboard-layout { width:min(100%, 1440px); margin:0 auto; padding:20px; display:grid; grid-template-columns:minmax(280px,340px) minmax(0,1fr); gap:18px; }
+    .dashboard-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:14px; }
+    .dashboard-head p { margin:4px 0 0; color:var(--muted); font-size:13px; line-height:1.4; }
+    .dashboard-actions { display:flex; flex-direction:column; align-items:flex-end; gap:6px; min-width:190px; }
+    .dashboard-actions button { width:100%; }
+    .dashboard-filters select[multiple] { min-height:92px; }
+    .dashboard-filter-actions { display:flex; gap:8px; margin-top:12px; }
+    .dashboard-filter-actions button { flex:1; }
+    .dashboard-note { color:var(--muted); font-size:12px; line-height:1.45; margin-top:10px; }
+    .dashboard-table table { min-width:960px; }
     .post-run-panel { margin-top:18px; border-top:1px solid var(--line); padding-top:16px; }
     .metric-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px,1fr)); gap:10px; margin:10px 0 16px; }
     .metric-card { border:1px solid var(--line); border-radius:8px; padding:10px; background:#fbfcfe; min-width:0; }
@@ -658,7 +723,7 @@ _INDEX_HTML = """
     .ok { color:var(--ok); }
     .bad { color:var(--bad); }
     .muted { color:var(--muted); }
-    @media (max-width: 860px) { main, .history-layout { grid-template-columns:minmax(0,1fr); padding:12px; } }
+    @media (max-width: 860px) { main, .history-layout, .dashboard-layout { grid-template-columns:minmax(0,1fr); padding:12px; } .dashboard-head { flex-direction:column; } .dashboard-actions { align-items:stretch; width:100%; } }
   </style>
 </head>
 <body>
@@ -667,10 +732,93 @@ _INDEX_HTML = """
     <div id="config-status" class="status">Carregando configuracao local...</div>
   </header>
   <nav class="tabs" aria-label="Navegacao principal">
-    <button class="tab-button active" type="button" data-tab="execution-panel">Execucao</button>
+    <button class="tab-button active" type="button" data-tab="dashboard-panel">Dashboard</button>
+    <button class="tab-button" type="button" data-tab="execution-panel">Execucao</button>
     <button class="tab-button" type="button" data-tab="history-panel">Execucoes anteriores</button>
   </nav>
-  <main id="execution-panel" class="tab-panel">
+  <main id="dashboard-panel" class="dashboard-layout tab-panel">
+    <aside class="dashboard-filters">
+      <h2>Filtros globais</h2>
+      <label>Dataset
+        <select id="dashboard_dataset"><option value="J1">J1</option><option value="J2">J2</option><option value="all">Todos</option></select>
+      </label>
+      <label>Modelo candidato
+        <select id="dashboard_candidate_model" multiple></select>
+      </label>
+      <label>Modelo juiz
+        <select id="dashboard_judge_model" multiple></select>
+      </label>
+      <label>Status
+        <select id="dashboard_status"><option value="all">todos</option><option value="sucesso">sucesso</option><option value="erro">erro</option></select>
+      </label>
+      <label>Agrupamento
+        <select id="dashboard_group_by"><option value="modelo">por modelo</option><option value="juiz">por juiz</option><option value="dataset">por dataset</option><option value="disciplina">por disciplina</option><option value="dificuldade">por dificuldade</option></select>
+      </label>
+      <div class="dashboard-filter-actions">
+        <button id="dashboard-refresh" type="button">Atualizar</button>
+        <button id="dashboard-clear" class="secondary" type="button">Limpar</button>
+      </div>
+      <p class="dashboard-note">J1 e o dataset padrao. Spearman principal em J1 so aparece quando houver nota de referencia ordinal persistida; juiz x arbitro e exibido separadamente como consistencia.</p>
+    </aside>
+    <section>
+      <div class="dashboard-head">
+        <div>
+          <h2>Resultados e Auditoria da Avaliacao</h2>
+          <p>Visao consolidada das avaliacoes LLM-as-a-Judge, correlacao, distribuicao de notas e analise de erros.</p>
+        </div>
+        <div class="dashboard-actions">
+          <button id="database-dump" type="button">Exportar dump do banco</button>
+          <span id="database-dump-status" class="status">Dump completo em outputs/backup.</span>
+        </div>
+      </div>
+      <div id="dashboard-cards" class="metric-grid"></div>
+      <div class="chart-grid">
+        <div class="chart">
+          <h3>Ranking geral dos modelos candidatos</h3>
+          <div id="dashboard-candidate-ranking"></div>
+        </div>
+        <div class="chart">
+          <h3>Distribuicao de notas 1-5</h3>
+          <div id="dashboard-score-distribution"></div>
+        </div>
+        <div class="chart">
+          <h3>Media por juiz</h3>
+          <div id="dashboard-judge-average"></div>
+        </div>
+        <div class="chart">
+          <h3>Divergencias para auditoria</h3>
+          <div id="dashboard-divergences"></div>
+        </div>
+        <div class="chart">
+          <h3>Casos criticos</h3>
+          <div id="dashboard-critical-chart"></div>
+        </div>
+      </div>
+      <p id="dashboard-methodology" class="dashboard-note"></p>
+      <h2 style="margin-top:18px">Casos criticos e divergencias</h2>
+      <div class="table-wrap dashboard-table">
+        <table aria-label="Casos criticos do dashboard">
+          <thead>
+            <tr>
+              <th>motivo</th>
+              <th>dataset</th>
+              <th>id_resposta</th>
+              <th>id_pergunta</th>
+              <th>modelo_candidato</th>
+              <th>juiz</th>
+              <th>papel</th>
+              <th>nota</th>
+              <th>status</th>
+            </tr>
+          </thead>
+          <tbody id="dashboard-cases-body">
+            <tr><td colspan="9" class="muted">Carregando dashboard.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <main id="execution-panel" class="tab-panel" hidden>
     <aside>
       <h2>Presets</h2>
       <div id="presets" class="presets"></div>
@@ -926,6 +1074,7 @@ _INDEX_HTML = """
     let csrfToken = "";
     let pollTimer = null;
     let historyLoaded = false;
+    let dashboardLoaded = false;
     let currentAuditLogUrl = null;
     let activeRunId = null;
 
@@ -954,6 +1103,144 @@ _INDEX_HTML = """
     function formatDateTime(value) {
       if (!value) return "-";
       return new Date(value).toLocaleString();
+    }
+
+    function selectedValues(id) {
+      return Array.from(document.getElementById(id).selectedOptions).map((option) => option.value).filter(Boolean);
+    }
+
+    function dashboardQuery() {
+      const params = new URLSearchParams();
+      params.set("dataset", value("dashboard_dataset"));
+      params.set("status", value("dashboard_status"));
+      params.set("group_by", value("dashboard_group_by"));
+      const candidates = selectedValues("dashboard_candidate_model");
+      const judges = selectedValues("dashboard_judge_model");
+      if (candidates.length) params.set("candidate_model", candidates.join(","));
+      if (judges.length) params.set("judge_model", judges.join(","));
+      return params.toString();
+    }
+
+    async function loadDashboard() {
+      const body = document.getElementById("dashboard-cases-body");
+      body.innerHTML = '<tr><td colspan="9" class="muted">Carregando dashboard.</td></tr>';
+      try {
+        const response = await fetch(`/api/dashboard?${dashboardQuery()}`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Dashboard indisponivel.");
+        dashboardLoaded = true;
+        renderDashboard(data);
+      } catch (error) {
+        body.innerHTML = "";
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 9;
+        cell.className = "muted";
+        cell.textContent = friendlyErrorMessage(error.message);
+        row.appendChild(cell);
+        body.appendChild(row);
+      }
+    }
+
+    function renderDashboard(data) {
+      populateSelect("dashboard_candidate_model", data.options?.candidate_models || [], selectedValues("dashboard_candidate_model"));
+      populateSelect("dashboard_judge_model", data.options?.judge_models || [], selectedValues("dashboard_judge_model"));
+      renderDashboardCards(data.cards || {});
+      renderBarChart("dashboard-candidate-ranking", data.charts?.candidate_ranking || [], {scaleMax: 5});
+      renderBarChart("dashboard-score-distribution", data.charts?.score_distribution || [], {scaleMax: 1, showPercent: true, colorByLabel: true});
+      renderBarChart("dashboard-judge-average", data.charts?.judge_average || [], {scaleMax: 5});
+      renderBarChart("dashboard-divergences", data.charts?.divergences || [], {scaleMax: 1, tone: "bad"});
+      renderBarChart("dashboard-critical-chart", data.charts?.critical_cases || [], {scaleMax: 1, tone: "bad"});
+      setText("dashboard-methodology", `${data.methodology?.primary_spearman || ""} ${data.methodology?.judge_arbiter || ""}`.trim());
+      renderDashboardCases([...(data.tables?.critical_cases || []), ...(data.tables?.divergence_cases || [])]);
+    }
+
+    function populateSelect(id, values, selected) {
+      const select = document.getElementById(id);
+      const selectedSet = new Set(selected || []);
+      select.textContent = "";
+      for (const value of values) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value;
+        option.selected = selectedSet.has(value);
+        select.appendChild(option);
+      }
+    }
+
+    function renderDashboardCards(cards) {
+      const root = document.getElementById("dashboard-cards");
+      root.textContent = "";
+      const coverage = cards.coverage || {};
+      const metrics = [
+        ["Avaliacoes realizadas", cards.evaluations],
+        ["Cobertura do dataset", `${display(coverage.evaluated)}/${display(coverage.expected)} (${displayPercent(coverage.percent)})`],
+        ["Taxa de sucesso", displayPercent(cards.success_rate)],
+        ["Nota media geral", formatAverage(cards.average_score)],
+        ["Spearman juiz x referencia", formatSpearman(cards.spearman_reference)],
+        ["Consistencia juiz x arbitro", formatSpearman(cards.judge_arbiter_consistency)],
+        ["Falhas criticas detectadas", cards.critical_failures],
+        ["Divergencias para auditoria", cards.audit_divergences]
+      ];
+      for (const metric of metrics) {
+        const card = document.createElement("div");
+        card.className = "metric-card";
+        const value = document.createElement("span");
+        value.className = "metric-value";
+        value.textContent = display(metric[1]);
+        const label = document.createElement("span");
+        label.className = "metric-label";
+        label.textContent = metric[0];
+        card.appendChild(value);
+        card.appendChild(label);
+        const source = metric[0].startsWith("Spearman") ? cards.spearman_reference : metric[0].startsWith("Consistencia") ? cards.judge_arbiter_consistency : null;
+        if (source?.note) {
+          const note = document.createElement("span");
+          note.className = "metric-label";
+          note.textContent = source.note;
+          card.appendChild(note);
+        }
+        root.appendChild(card);
+      }
+    }
+
+    function renderDashboardCases(cases) {
+      const body = document.getElementById("dashboard-cases-body");
+      body.textContent = "";
+      if (!cases.length) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 9;
+        cell.className = "muted";
+        cell.textContent = "Sem casos criticos ou divergencias no filtro atual.";
+        row.appendChild(cell);
+        body.appendChild(row);
+        return;
+      }
+      cases.slice(0, 40).forEach((item) => {
+        const row = document.createElement("tr");
+        for (const value of [
+          item.reason,
+          item.dataset,
+          item.answer_id,
+          item.question_id,
+          item.candidate_model,
+          item.judge_model,
+          normalizeRole(item.role),
+          item.score,
+          item.status
+        ]) appendCell(row, display(value));
+        body.appendChild(row);
+      });
+    }
+
+    function displayPercent(value) {
+      return value === null || value === undefined ? "-" : `${value}%`;
+    }
+
+    function formatSpearman(value) {
+      if (!value || !value.available) return "N/A";
+      return `${Number(value.value).toFixed(3)} (n=${value.sample_size})`;
     }
 
     function renderAuditLog(data) {
@@ -1464,6 +1751,7 @@ _INDEX_HTML = """
       for (const panel of document.querySelectorAll(".tab-panel")) {
         panel.hidden = panel.id !== targetId;
       }
+      if (targetId === "dashboard-panel" && !dashboardLoaded) loadDashboard();
       if (targetId === "history-panel" && !historyLoaded) loadHistory();
     }
 
@@ -1496,6 +1784,7 @@ _INDEX_HTML = """
       renderEndpointFields();
       document.getElementById("dry-run").disabled = false;
       document.getElementById("run").disabled = false;
+      await loadDashboard();
     }
 
     function copyEndpointValues(source, target) {
@@ -1549,6 +1838,35 @@ _INDEX_HTML = """
     for (const button of document.querySelectorAll(".tab-button")) {
       button.onclick = () => switchTab(button.dataset.tab);
     }
+    document.getElementById("dashboard-refresh").onclick = loadDashboard;
+    document.getElementById("dashboard-clear").onclick = () => {
+      document.getElementById("dashboard_dataset").value = "J1";
+      document.getElementById("dashboard_status").value = "all";
+      document.getElementById("dashboard_group_by").value = "modelo";
+      for (const id of ["dashboard_candidate_model", "dashboard_judge_model"]) {
+        for (const option of document.getElementById(id).options) option.selected = false;
+      }
+      loadDashboard();
+    };
+    document.getElementById("database-dump").onclick = async () => {
+      const button = document.getElementById("database-dump");
+      const status = document.getElementById("database-dump-status");
+      button.disabled = true;
+      status.textContent = "Gerando dump completo...";
+      try {
+        const data = await postJson("/api/database-dumps", {});
+        const link = document.createElement("a");
+        link.href = data.download_url;
+        link.download = data.filename;
+        link.textContent = `${data.filename} (${Math.round((data.size_bytes || 0) / 1024)} KB)`;
+        status.textContent = "";
+        status.appendChild(link);
+      } catch (error) {
+        status.textContent = friendlyErrorMessage(error.message);
+      } finally {
+        button.disabled = false;
+      }
+    };
 
     document.getElementById("dry-run").onclick = async () => {
       try {
