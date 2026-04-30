@@ -10,15 +10,17 @@ from tqdm import tqdm
 
 
 DATASET_NAME = "OAB_Bench"
-DATASET_DOMAIN = "Jurídico"
+DATASET_DOMAIN = "Juridico"
 DATASET_SOURCE = "maritaca-ai/oab-bench"
 DEFAULT_QUESTIONS_PATH = Path("database/oab_bench/question.jsonl")
 DEFAULT_GUIDELINES_PATH = Path("database/oab_bench/guidelines.jsonl")
+QUESTION_SEQ_START = 71
+QUESTION_SEQ_END = 140
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Importa o dataset local maritaca-ai/oab-bench para o PostgreSQL."
+        description="Importa apenas a faixa canonica do dataset local maritaca-ai/oab-bench."
     )
     parser.add_argument(
         "--questions",
@@ -31,9 +33,21 @@ def parse_args():
         help="Caminho do arquivo guidelines.jsonl.",
     )
     parser.add_argument(
+        "--start-seq",
+        type=int,
+        default=QUESTION_SEQ_START,
+        help="Primeira sequencia canonica a importar. Padrao: 71.",
+    )
+    parser.add_argument(
+        "--end-seq",
+        type=int,
+        default=QUESTION_SEQ_END,
+        help="Ultima sequencia canonica a importar. Padrao: 140.",
+    )
+    parser.add_argument(
         "--replace",
         action="store_true",
-        help="Remove registros anteriores do OAB_Bench antes da importação.",
+        help="Remove registros anteriores do OAB_Bench antes da importacao.",
     )
     parser.add_argument(
         "--batch-size",
@@ -65,7 +79,7 @@ def read_jsonl(path):
             try:
                 records.append(json.loads(line))
             except json.JSONDecodeError as exc:
-                raise ValueError(f"JSON inválido em {path}, linha {line_number}: {exc}") from exc
+                raise ValueError(f"JSON invalido em {path}, linha {line_number}: {exc}") from exc
 
     return records
 
@@ -137,8 +151,8 @@ def replace_dataset_rows(cur, id_dataset):
 
 def question_kind(question_id):
     if question_id.endswith("_peca_profissional"):
-        return "peça profissional"
-    return "questão discursiva"
+        return "peca profissional"
+    return "questao discursiva"
 
 
 def build_enunciado(question):
@@ -169,7 +183,7 @@ def build_resposta_ouro(guideline):
     return "\n\n".join(answers)
 
 
-def build_metadata(question, guideline):
+def build_metadata(question, guideline, sequence_number):
     choice = (guideline.get("choices") or [{}])[0]
 
     metadata = {
@@ -184,6 +198,7 @@ def build_metadata(question, guideline):
         "guideline_answer_id": guideline.get("answer_id"),
         "guideline_model_id": guideline.get("model_id"),
         "guideline_choice_index": choice.get("index"),
+        "legacy_sequence": sequence_number,
     }
 
     if guideline.get("tstamp") is not None:
@@ -204,18 +219,18 @@ def validate_records(questions, guidelines_by_id):
     if duplicates:
         raise ValueError(f"Existem {duplicates} question_id duplicados em question.jsonl")
 
-    extra_guidelines = set(guidelines_by_id) - set(question_ids)
-    if extra_guidelines:
-        sample = ", ".join(sorted(extra_guidelines)[:5])
-        raise ValueError(f"Existem guidelines sem pergunta correspondente: {sample}")
-
 
 def main():
     args = parse_args()
-    questions = read_jsonl(args.questions)
+    if args.start_seq <= 0 or args.end_seq < args.start_seq:
+        raise ValueError("Faixa invalida para OAB_Bench.")
+
+    all_questions = read_jsonl(args.questions)
     guidelines = read_jsonl(args.guidelines)
     guidelines_by_id = index_guidelines(guidelines)
-    validate_records(questions, guidelines_by_id)
+
+    selected_questions = all_questions[args.start_seq - 1 : args.end_seq]
+    validate_records(selected_questions, guidelines_by_id)
 
     conn = connect_db()
     try:
@@ -227,28 +242,45 @@ def main():
                     replace_dataset_rows(cur, id_dataset)
 
                 rows = []
-                for question in tqdm(questions, desc="Preparando questões"):
+                for sequence_number, question in enumerate(
+                    tqdm(selected_questions, desc="Preparando questoes"),
+                    start=args.start_seq,
+                ):
                     guideline = guidelines_by_id[question["question_id"]]
                     rows.append(
                         (
+                            sequence_number,
                             id_dataset,
                             build_enunciado(question),
                             build_resposta_ouro(guideline),
-                            Json(build_metadata(question, guideline), dumps=lambda value: json.dumps(value, ensure_ascii=False)),
+                            Json(
+                                build_metadata(question, guideline, sequence_number),
+                                dumps=lambda value: json.dumps(value, ensure_ascii=False),
+                            ),
                         )
                     )
 
                 execute_batch(
                     cur,
                     """
-                    INSERT INTO perguntas (id_dataset, enunciado, resposta_ouro, metadados)
-                    VALUES (%s, %s, %s, %s);
+                    INSERT INTO perguntas (id_pergunta, id_dataset, enunciado, resposta_ouro, metadados)
+                    VALUES (%s, %s, %s, %s, %s);
                     """,
                     rows,
                     page_size=args.batch_size,
                 )
 
-        print(f"Inserção concluída. Total de registros: {len(rows)}")
+                cur.execute(
+                    """
+                    SELECT setval(
+                        'perguntas_id_pergunta_seq',
+                        COALESCE((SELECT MAX(id_pergunta) FROM perguntas), 1),
+                        true
+                    );
+                    """
+                )
+
+        print(f"Insercao concluida. Total de registros: {len(rows)}")
     finally:
         conn.close()
 

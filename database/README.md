@@ -24,6 +24,15 @@ make db-restore-validate
 
 Isso garante que o PostgreSQL local esteja de pe, com o backup principal restaurado e validado.
 
+## Faixas canonicas de perguntas carregadas
+
+A base canonica do projeto nao carrega o dataset inteiro. Ela carrega apenas as faixas efetivamente cobertas pelos alunos:
+
+- `OAB_Bench`: abertas `71..140`
+- `OAB_Exames`: multipla escolha `739..1476`
+
+Com isso, os dumps oficiais ja nascem sem perguntas fora do escopo respondido pela turma.
+
 ## Cinco comandos que os desenvolvedores vao usar
 
 ### 1. Gerar apenas o dump do DDL
@@ -159,6 +168,7 @@ make db-dump-all
   - `question_id` textual salvo em `metadados`;
   - numero sequencial da questao dentro do dataset.
 - `texto_resposta` vazio e preservado como string vazia quando o modelo nao respondeu nada.
+- A carga canonica de perguntas ja considera apenas as faixas efetivamente respondidas pelos alunos.
 
 ## Scripts ETL
 
@@ -170,19 +180,13 @@ Os scripts em `database/scripts_etl/` usam a convencao atual do projeto:
 ### OAB_Exames
 
 ```bash
-HF_HOME=.hf_cache .venv/bin/python database/scripts_etl/import_oab_exames.py --limit 100 --truncate
-```
-
-Para importar todo o split:
-
-```bash
-HF_HOME=.hf_cache .venv/bin/python database/scripts_etl/import_oab_exames.py --limit 0 --truncate
+HF_HOME=.hf_cache .venv/bin/python database/scripts_etl/import_oab_exames.py --start-id 739 --end-id 1476 --truncate
 ```
 
 ### OAB_Bench
 
 ```bash
-.venv/bin/python database/scripts_etl/import_oab_bench.py --replace
+.venv/bin/python database/scripts_etl/import_oab_bench.py --start-seq 71 --end-seq 140 --replace
 ```
 
 ### Respostas da Atividade 1
