@@ -3,8 +3,6 @@ services:
     image: ${POSTGRES_IMAGE:-postgres:18.3}
     container_name: ${POSTGRES_CONTAINER_NAME:-topicos-av2-postgres}
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -23,6 +21,23 @@ services:
       timeout: 5s
       retries: 20
       start_period: 5s
+
+  judge-web:
+    build:
+      context: .
+    container_name: ${WEB_CONTAINER_NAME:-topicos-av2-judge-web}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-app_dev}
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8000}:8000"
+    volumes:
+      - ./outputs:/app/outputs
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:

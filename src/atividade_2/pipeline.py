@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 
 from .audit import AuditEvent, NullAuditLogger
 from .contracts import (
+    BatchProgress,
     CandidateAnswerContext,
+    EvaluationProgress,
     EvaluationRecord,
     ModelSpec,
     PipelineSummary,
@@ -28,10 +30,14 @@ class JudgePipeline:
         repository: JudgeRepositoryProtocol,
         client: JudgeClient,
         audit: NullAuditLogger | None = None,
+        progress_callback: Callable[[BatchProgress], None] | None = None,
+        evaluation_callback: Callable[[EvaluationProgress], None] | None = None,
     ) -> None:
         self.repository = repository
         self.client = client
         self.audit = audit or NullAuditLogger()
+        self.progress_callback = progress_callback
+        self.evaluation_callback = evaluation_callback
 
     def run(
         self,
@@ -41,8 +47,20 @@ class JudgePipeline:
         executed = 0
         skipped = 0
         arbiters = 0
+        total_answers = len(answers)
+        if total_answers == 0:
+            self._report_batch_progress(
+                BatchProgress(
+                    current=0,
+                    total=0,
+                    percent=100,
+                    executed_evaluations=0,
+                    skipped_evaluations=0,
+                    arbiter_evaluations=0,
+                )
+            )
 
-        for answer in answers:
+        for index, answer in enumerate(answers, start=1):
             self.audit.terminal_event(f"Running answer {answer.answer_id} ({answer.dataset_name})")
             self.audit.event(
                 AuditEvent(
@@ -57,6 +75,16 @@ class JudgePipeline:
             executed += result.executed_evaluations
             skipped += result.skipped_evaluations
             arbiters += result.arbiter_evaluations
+            self._report_batch_progress(
+                BatchProgress(
+                    current=index,
+                    total=total_answers,
+                    percent=int(index / total_answers * 100) if total_answers else 100,
+                    executed_evaluations=executed,
+                    skipped_evaluations=skipped,
+                    arbiter_evaluations=arbiters,
+                )
+            )
             self.audit.event(
                 AuditEvent(
                     "answer_finished",
@@ -73,6 +101,30 @@ class JudgePipeline:
             skipped_evaluations=skipped,
             arbiter_evaluations=arbiters,
         )
+
+    def _report_batch_progress(self, progress: BatchProgress) -> None:
+        self.audit.terminal_event(
+            (
+                f"Batch progress: {progress.current}/{progress.total} answers ({progress.percent}%) | "
+                f"executed={progress.executed_evaluations} skipped={progress.skipped_evaluations} "
+                f"arbiters={progress.arbiter_evaluations}"
+            )
+        )
+        self.audit.event(
+            AuditEvent(
+                "batch_progress",
+                (
+                    f"current={progress.current} total={progress.total} percent={progress.percent} "
+                    f"executed={progress.executed_evaluations} skipped={progress.skipped_evaluations} "
+                    f"arbiters={progress.arbiter_evaluations}"
+                ),
+            )
+        )
+        if self.progress_callback is not None:
+            try:
+                self.progress_callback(progress)
+            except Exception as error:
+                self.audit.event(AuditEvent("batch_progress_callback_failed", f"error={error}"))
 
     def _run_answer(self, answer: CandidateAnswerContext, config: RuntimeJudgeConfig) -> PipelineSummary:
         if config.panel_mode == "single":
@@ -113,6 +165,20 @@ class JudgePipeline:
                         ),
                     )
                 )
+                self._report_evaluation_progress(
+                    EvaluationProgress(
+                        status="skipped",
+                        dataset=answer.dataset_name,
+                        question_id=answer.question_id,
+                        answer_id=answer.answer_id,
+                        candidate_model=answer.candidate_model,
+                        judge_model=judge_model.provider_model,
+                        role=stored_role,
+                        panel_mode=config.panel_mode,
+                        score=score_before,
+                        trigger_reason=f"{config.panel_mode}:existing_evaluation",
+                    )
+                )
                 continue
             pending.append((judge_model, stored_role))
 
@@ -150,6 +216,22 @@ class JudgePipeline:
                     ),
                 )
             )
+            if config.arbiter is not None:
+                self._report_evaluation_progress(
+                    EvaluationProgress(
+                        status="skipped",
+                        dataset=answer.dataset_name,
+                        question_id=answer.question_id,
+                        answer_id=answer.answer_id,
+                        candidate_model=answer.candidate_model,
+                        judge_model=config.arbiter.provider_model,
+                        role="arbitro",
+                        panel_mode=config.panel_mode,
+                        delta=score_delta,
+                        arbiter_triggered=False,
+                        trigger_reason="delta_below_threshold",
+                    )
+                )
             return PipelineSummary(1, executed, skipped, 0)
 
         assert config.arbiter is not None
@@ -189,6 +271,19 @@ class JudgePipeline:
                     ),
                 )
             )
+            self._report_evaluation_progress(
+                EvaluationProgress(
+                    status="skipped",
+                    dataset=answer.dataset_name,
+                    question_id=answer.question_id,
+                    answer_id=answer.answer_id,
+                    candidate_model=answer.candidate_model,
+                    judge_model=judge_model.provider_model,
+                    role=stored_role,
+                    panel_mode=config.panel_mode,
+                    trigger_reason=f"{config.panel_mode}:existing_evaluation",
+                )
+            )
             return 0, 1
         record = self._execute_judge(
             answer=answer,
@@ -222,23 +317,60 @@ class JudgePipeline:
             f"answer_id={answer.answer_id} question_id={answer.question_id} "
             f"model={judge_model.provider_model} role={stored_role} trigger={trigger_reason}"
         )
-        with self.audit.step(
-            f"Running answer {answer.answer_id} with {judge_model.requested}",
-            detail=detail,
-            terminal=terminal_progress,
-        ):
-            raw_response = self.client.judge(
+        self._report_evaluation_progress(
+            EvaluationProgress(
+                status="running",
+                dataset=answer.dataset_name,
+                question_id=answer.question_id,
+                answer_id=answer.answer_id,
+                candidate_model=answer.candidate_model,
+                judge_model=judge_model.provider_model,
+                role=stored_role,
+                panel_mode=config.panel_mode,
+                arbiter_triggered=True if stored_role == "arbitro" else None,
+                trigger_reason=f"{config.panel_mode}:{trigger_reason}",
                 prompt=prompt,
-                model=judge_model.provider_model,
-                requested_model=judge_model.requested,
-                endpoint_key=_endpoint_key_for_role(stored_role, config.panel_mode),
             )
-        with self.audit.step(
-            f"Parsing judge response for answer {answer.answer_id}",
-            detail=detail,
-            terminal=terminal_progress,
-        ):
-            parsed = parse_judge_output(raw_response.text)
+        )
+        raw_response = None
+        try:
+            with self.audit.step(
+                f"Running answer {answer.answer_id} with {judge_model.requested}",
+                detail=detail,
+                terminal=terminal_progress,
+            ):
+                raw_response = self.client.judge(
+                    prompt=prompt,
+                    model=judge_model.provider_model,
+                    requested_model=judge_model.requested,
+                    endpoint_key=_endpoint_key_for_role(stored_role, config.panel_mode),
+                )
+            with self.audit.step(
+                f"Parsing judge response for answer {answer.answer_id}",
+                detail=detail,
+                terminal=terminal_progress,
+            ):
+                parsed = parse_judge_output(raw_response.text)
+        except Exception as error:
+            self._report_evaluation_progress(
+                EvaluationProgress(
+                    status="failed",
+                    dataset=answer.dataset_name,
+                    question_id=answer.question_id,
+                    answer_id=answer.answer_id,
+                    candidate_model=answer.candidate_model,
+                    judge_model=judge_model.provider_model,
+                    role=stored_role,
+                    panel_mode=config.panel_mode,
+                    arbiter_triggered=True if stored_role == "arbitro" else None,
+                    trigger_reason=f"{config.panel_mode}:{trigger_reason}",
+                    latency_ms=raw_response.latency_ms if raw_response is not None else None,
+                    error=str(error),
+                    prompt=prompt,
+                    raw_response=raw_response.text if raw_response is not None else None,
+                )
+            )
+            raise
         self.audit.event(
             AuditEvent(
                 "evaluation_parsed",
@@ -246,6 +378,25 @@ class JudgePipeline:
                     f"{detail} score={parsed.score} latency_ms={raw_response.latency_ms} "
                     f"status_code={raw_response.status_code}"
                 ),
+            )
+        )
+        self._report_evaluation_progress(
+            EvaluationProgress(
+                status="success",
+                dataset=answer.dataset_name,
+                question_id=answer.question_id,
+                answer_id=answer.answer_id,
+                candidate_model=answer.candidate_model,
+                judge_model=judge_model.provider_model,
+                role=stored_role,
+                panel_mode=config.panel_mode,
+                score=parsed.score,
+                arbiter_triggered=True if stored_role == "arbitro" else None,
+                trigger_reason=f"{config.panel_mode}:{trigger_reason}",
+                latency_ms=raw_response.latency_ms,
+                prompt=prompt,
+                raw_response=raw_response.text,
+                rationale=parsed.rationale,
             )
         )
         return EvaluationRecord(
@@ -312,6 +463,14 @@ class JudgePipeline:
                     for judge_model, stored_role in pending
                 ]
                 return [future.result() for future in futures]
+
+    def _report_evaluation_progress(self, progress: EvaluationProgress) -> None:
+        if self.evaluation_callback is None:
+            return
+        try:
+            self.evaluation_callback(progress)
+        except Exception as error:
+            self.audit.event(AuditEvent("evaluation_progress_callback_failed", f"error={error}"))
 
 
 def _arbiter_reason(config: RuntimeJudgeConfig, score_delta: int) -> str | None:

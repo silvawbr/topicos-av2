@@ -3,7 +3,7 @@ PYTHON := $(VENV)/bin/python
 PIP := $(PYTHON) -m pip
 PYTEST := $(PYTHON) -m pytest
 
-.PHONY: venv install test db-up db-down db-logs db-psql db-status db-reset db-migrate-or-create db-restore-validate db-backup db-dump-structure db-dump-questions db-dump-responses db-dump-root-backup db-dump-all clean
+.PHONY: venv install test db-up db-down db-logs db-psql db-status db-reset db-migrate-or-create db-restore-validate db-backup db-dump-structure db-dump-questions db-dump-responses db-dump-root-backup db-dump-all web-up web-down web-logs clean
 
 venv:
 	@if [ ! -d "$(VENV)" ]; then \
@@ -47,6 +47,15 @@ db-restore-validate:
 
 db-backup:
 	./scripts/db_backup.sh
+
+web-up: db-up
+	./scripts/web_up.sh
+
+web-down:
+	docker compose --env-file .env stop judge-web
+
+web-logs:
+	docker compose --env-file .env logs -f judge-web
 
 db-dump-structure:
 	./scripts/db_dump_structure.sh

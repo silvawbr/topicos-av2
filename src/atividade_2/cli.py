@@ -3,21 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import re
 from collections.abc import Sequence
-from datetime import datetime
-from pathlib import Path
-from urllib.parse import urlparse
 
-from .audit import AuditLogger
-from .config import ConfigurationError, load_settings, resolve_runtime_config
-from .contracts import ModelSpec, RuntimeJudgeConfig, StoredJudgeRole
-from .db import connect
-from .judge_clients.remote_http import RemoteHttpJudgeClient, RemoteJudgeError
-from .model_aliases import format_model_mapping
+from .config import ConfigurationError
+from .judge_clients.remote_http import RemoteJudgeError
 from .parser import JudgeParseError
-from .pipeline import JudgePipeline
-from .repositories import JudgeRepository
+from .run_judge_service import ResolvedRun, RunJudgeRequest, RunJudgeService, format_execution_summary
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -96,126 +87,35 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def run_judge_command(args: argparse.Namespace) -> int:
     """Run or dry-run the judge pipeline."""
-    audit_path = _resolve_audit_path(args.audit_log)
-    animate = False if args.no_audit_animation else None
-    with AuditLogger(file_path=audit_path, animate=animate) as audit:
-        with audit.step("Loading configuration"):
-            settings = load_settings()
-        with audit.step(
-            "Resolving judge mode and models",
-            detail=(
-                f"panel_mode_cli={args.panel_mode} judge_model_cli={_present(args.judge_model)} "
-                f"secondary_judge_cli={_present(args.secondary_judge_model)} "
-                f"arbiter_cli={_present(args.arbiter_judge_model)} "
-                f"execution_strategy_cli={_present(args.judge_execution_strategy)}"
-            ),
-        ):
-            runtime_config = resolve_runtime_config(
-                settings,
-                judge_provider=args.judge_provider,
-                panel_mode=args.panel_mode,
-                judge_model=args.judge_model,
-                secondary_judge_model=args.secondary_judge_model,
-                arbiter_judge_model=args.arbiter_judge_model,
-                always_run_arbiter=args.always_run_arbiter,
-                execution_strategy=args.judge_execution_strategy,
-            )
-        batch_size = args.batch_size or settings.judge_batch_size
-        summary_text = format_execution_summary(runtime_config)
-        print(summary_text)
-        print(f"Batch size: {batch_size}")
-        print(f"Audit log: {audit.file_path}")
-        audit.file_event("execution_summary", summary_text.replace("\n", " | "))
-        if args.dry_run:
-            audit.terminal_event("Dry run: no database rows selected and no remote judge calls made.")
-            audit.file_event("dry_run_finished", "no database rows selected and no remote judge calls made")
-            return 0
-
-        with audit.step("Connecting to local PostgreSQL", detail="DATABASE_URL=<redacted>"):
-            connection = connect(settings.database_url)
-        try:
-            repository = JudgeRepository(connection)
-            with audit.step("Ensuring judge metadata schema"):
-                repository.ensure_schema()
-            with audit.step(
-                f"Selecting pending candidate answers for {args.dataset}",
-                detail=f"dataset={args.dataset} batch_size={batch_size}",
-            ):
-                answers = repository.select_pending_candidate_answers(
-                    dataset=args.dataset,
-                    batch_size=batch_size,
-                    required_evaluations=_required_evaluations(runtime_config),
-                )
-            audit.file_event("answers_selected", f"count={len(answers)}")
-            client = RemoteHttpJudgeClient(settings)
-            with audit.step(
-                "Running judge pipeline",
-                detail=f"answers={len(answers)} mode={runtime_config.panel_mode}",
-            ):
-                summary = JudgePipeline(repository, client, audit=audit).run(answers, runtime_config)
-        finally:
-            with audit.step("Closing PostgreSQL connection"):
-                connection.close()
-
+    request = RunJudgeRequest(
+        judge_provider=args.judge_provider,
+        panel_mode=args.panel_mode,
+        judge_model=args.judge_model,
+        secondary_judge_model=args.secondary_judge_model,
+        arbiter_judge_model=args.arbiter_judge_model,
+        always_run_arbiter=args.always_run_arbiter,
+        judge_execution_strategy=args.judge_execution_strategy,
+        dataset=args.dataset,
+        batch_size=args.batch_size,
+        dry_run=args.dry_run,
+        audit_log=args.audit_log,
+        no_audit_animation=args.no_audit_animation,
+    )
+    result = RunJudgeService().run(request, on_resolved=_print_resolved_run)
+    if result.summary is not None:
         print()
         print("Execution result:")
-        print(f"Selected answers: {summary.selected_answers}")
-        print(f"Executed evaluations: {summary.executed_evaluations}")
-        print(f"Skipped existing evaluations: {summary.skipped_evaluations}")
-        print(f"Arbiter evaluations: {summary.arbiter_evaluations}")
-        audit.file_event(
-            "execution_result",
-            (
-                f"selected={summary.selected_answers} executed={summary.executed_evaluations} "
-                f"skipped={summary.skipped_evaluations} arbiters={summary.arbiter_evaluations}"
-            ),
-        )
+        print(f"Selected answers: {result.summary.selected_answers}")
+        print(f"Executed evaluations: {result.summary.executed_evaluations}")
+        print(f"Skipped existing evaluations: {result.summary.skipped_evaluations}")
+        print(f"Arbiter evaluations: {result.summary.arbiter_evaluations}")
     return 0
 
 
-def format_execution_summary(config: RuntimeJudgeConfig) -> str:
-    """Build a secret-safe execution summary."""
-    lines = [
-        f"Judge provider: {config.provider}",
-        f"Judge mode: {config.panel_mode}",
-        f"Judge execution strategy: {config.execution_strategy}",
-    ]
-    if config.panel_mode == "single":
-        assert config.single_judge is not None
-        lines.extend(
-            [
-                "Judge model:",
-                _format_model_with_endpoint(config, config.single_judge, "SINGLE"),
-                f"Model source: {config.model_source}",
-            ]
-        )
-        return "\n".join(lines)
-
-    lines.append("Primary judges:")
-    lines.extend(
-        _format_model_with_endpoint(config, model, endpoint_key)
-        for model, endpoint_key in zip(config.primary_panel, ("JUDGE", "SECONDARY_JUDGE"), strict=True)
-    )
-    if config.panel_mode == "primary_only":
-        lines.extend(
-            [
-                "Arbiter: disabled for primary_only mode",
-                f"Model source: {config.model_source}",
-            ]
-        )
-        return "\n".join(lines)
-
-    assert config.arbiter is not None
-    lines.extend(
-        [
-            "Arbiter:",
-            _format_model_with_endpoint(config, config.arbiter, "ARBITER"),
-            f"Arbitration min delta: {config.arbitration_min_delta}",
-            f"Always run arbiter: {str(config.always_run_arbiter).lower()}",
-            f"Model source: {config.model_source}",
-        ]
-    )
-    return "\n".join(lines)
+def _print_resolved_run(resolved: ResolvedRun) -> None:
+    print(resolved.execution_summary)
+    print(f"Batch size: {resolved.batch_size}")
+    print(f"Audit log: {resolved.audit_path}")
 
 
 def _positive_int(value: str) -> int:
@@ -226,67 +126,6 @@ def _positive_int(value: str) -> int:
     if parsed < 1:
         raise argparse.ArgumentTypeError("value must be >= 1")
     return parsed
-
-
-def _resolve_audit_path(raw_path: str | None) -> Path:
-    if raw_path:
-        return Path(raw_path)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return Path("outputs") / "audit" / f"judge_run_{timestamp}.log"
-
-
-def _present(value: str | None) -> str:
-    return "provided" if value else "not_provided"
-
-
-def _required_evaluations(config: RuntimeJudgeConfig) -> tuple[tuple[ModelSpec, StoredJudgeRole, str], ...]:
-    if config.panel_mode == "single":
-        assert config.single_judge is not None
-        return ((config.single_judge, "principal", config.panel_mode),)
-    return tuple(
-        (model, role, config.panel_mode)
-        for model, role in zip(config.primary_panel, ("principal", "controle"), strict=False)
-    )
-
-
-def _format_model_with_endpoint(config: RuntimeJudgeConfig, model, endpoint_key: str) -> str:
-    mapping = format_model_mapping(model)
-    endpoint = _resolve_endpoint_base_url(config, model, endpoint_key)
-    host = _endpoint_host(endpoint)
-    return f"{mapping} | endpoint={host}"
-
-
-def _resolve_endpoint_base_url(config: RuntimeJudgeConfig, model, endpoint_key: str) -> str | None:
-    normalized_endpoint_key = _endpoint_key(endpoint_key)
-    if normalized_endpoint_key == "JUDGE":
-        return config.settings.remote_judge_base_url
-    endpoint = config.settings.remote_judge_endpoints.get(normalized_endpoint_key)
-    if endpoint is not None:
-        return endpoint.base_url
-    for candidate in (model.requested, model.provider_model):
-        for key in _endpoint_keys(candidate):
-            endpoint = config.settings.remote_judge_endpoints.get(key)
-            if endpoint is not None:
-                return endpoint.base_url
-    return config.settings.remote_judge_base_url
-
-
-def _endpoint_keys(model: str) -> tuple[str, ...]:
-    keys = [_endpoint_key(model)]
-    if "/" in model:
-        keys.append(_endpoint_key(model.rsplit("/", 1)[-1]))
-    return tuple(dict.fromkeys(key for key in keys if key))
-
-
-def _endpoint_key(value: str) -> str:
-    return re.sub(r"[^A-Z0-9]+", "_", value.upper()).strip("_")
-
-
-def _endpoint_host(base_url: str | None) -> str:
-    if not base_url:
-        return "<missing>"
-    host = urlparse(base_url).hostname
-    return host or "<invalid>"
 
 
 if __name__ == "__main__":

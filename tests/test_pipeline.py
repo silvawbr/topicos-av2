@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from atividade_2.config import load_settings, resolve_runtime_config
-from atividade_2.contracts import CandidateAnswerContext, JudgeRawResponse
+from atividade_2.contracts import BatchProgress, CandidateAnswerContext, EvaluationProgress, JudgeRawResponse
 from atividade_2.pipeline import JudgePipeline
 from atividade_2.repositories import InMemoryJudgeRepository
 
@@ -40,6 +42,26 @@ class FakeJudgeClient:
         )
 
 
+class RecordingAudit:
+    def __init__(self) -> None:
+        self.terminal_messages: list[str] = []
+        self.file_events: list[tuple[str, str | None]] = []
+        self.events: list[tuple[str, str | None]] = []
+
+    def terminal_event(self, message: str) -> None:
+        self.terminal_messages.append(message)
+
+    def file_event(self, message: str, detail: str | None = None) -> None:
+        self.file_events.append((message, detail))
+
+    def event(self, event) -> None:
+        self.events.append((event.message, event.detail))
+
+    @contextmanager
+    def step(self, message: str, *, detail: str | None = None, terminal: bool = True):
+        yield
+
+
 def answer() -> CandidateAnswerContext:
     return CandidateAnswerContext(
         answer_id=1,
@@ -49,6 +71,19 @@ def answer() -> CandidateAnswerContext:
         reference_answer="A",
         candidate_answer="A",
         candidate_model="candidate",
+    )
+
+
+def answer_with_id(answer_id: int) -> CandidateAnswerContext:
+    base_answer = answer()
+    return CandidateAnswerContext(
+        answer_id=answer_id,
+        question_id=base_answer.question_id,
+        dataset_name=base_answer.dataset_name,
+        question_text=base_answer.question_text,
+        reference_answer=base_answer.reference_answer,
+        candidate_answer=base_answer.candidate_answer,
+        candidate_model=base_answer.candidate_model,
     )
 
 
@@ -64,6 +99,116 @@ def test_single_mode_runs_one_judge() -> None:
     assert len(repo.records) == 1
     assert repo.records[0].stored_role == "principal"
     assert client.endpoint_keys == ["JUDGE"]
+
+
+def test_pipeline_reports_batch_progress_after_each_answer() -> None:
+    settings = load_settings(dotenv_path=None, env=BASE_ENV)
+    config = resolve_runtime_config(settings, panel_mode="single")
+    repo = InMemoryJudgeRepository()
+    client = FakeJudgeClient({"openai/gpt-oss-120b": 5})
+    audit = RecordingAudit()
+    progress_events: list[BatchProgress] = []
+
+    JudgePipeline(repo, client, audit=audit, progress_callback=progress_events.append).run(
+        [answer_with_id(1), answer_with_id(2)],
+        config,
+    )
+
+    assert "Batch progress: 1/2 answers (50%) | executed=1 skipped=0 arbiters=0" in audit.terminal_messages
+    assert "Batch progress: 2/2 answers (100%) | executed=2 skipped=0 arbiters=0" in audit.terminal_messages
+    assert (
+        "batch_progress",
+        "current=2 total=2 percent=100 executed=2 skipped=0 arbiters=0",
+    ) in audit.events
+    assert progress_events == [
+        BatchProgress(
+            current=1,
+            total=2,
+            percent=50,
+            executed_evaluations=1,
+            skipped_evaluations=0,
+            arbiter_evaluations=0,
+        ),
+        BatchProgress(
+            current=2,
+            total=2,
+            percent=100,
+            executed_evaluations=2,
+            skipped_evaluations=0,
+            arbiter_evaluations=0,
+        ),
+    ]
+
+
+def test_pipeline_reports_evaluation_rows_for_web_table() -> None:
+    settings = load_settings(dotenv_path=None, env=BASE_ENV)
+    config = resolve_runtime_config(settings, panel_mode="single")
+    repo = InMemoryJudgeRepository()
+    client = FakeJudgeClient({"openai/gpt-oss-120b": 5})
+    evaluation_events: list[EvaluationProgress] = []
+
+    JudgePipeline(repo, client, evaluation_callback=evaluation_events.append).run([answer()], config)
+
+    assert [event.status for event in evaluation_events] == ["running", "success"]
+    success = evaluation_events[-1]
+    assert success.dataset == "OAB_Exames"
+    assert success.question_id == 1
+    assert success.candidate_model == "candidate"
+    assert success.judge_model == "openai/gpt-oss-120b"
+    assert success.role == "principal"
+    assert success.score == 5
+    assert success.latency_ms == 1
+    assert success.prompt
+    assert success.raw_response == '{"score": 5, "rationale": "nota 5"}'
+    assert success.rationale == "nota 5"
+
+
+def test_pipeline_reports_complete_progress_for_empty_batch() -> None:
+    settings = load_settings(dotenv_path=None, env=BASE_ENV)
+    config = resolve_runtime_config(settings, panel_mode="single")
+    audit = RecordingAudit()
+    progress_events: list[BatchProgress] = []
+
+    summary = JudgePipeline(
+        InMemoryJudgeRepository(),
+        FakeJudgeClient({"openai/gpt-oss-120b": 5}),
+        audit=audit,
+        progress_callback=progress_events.append,
+    ).run([], config)
+
+    assert summary.selected_answers == 0
+    assert progress_events == [
+        BatchProgress(
+            current=0,
+            total=0,
+            percent=100,
+            executed_evaluations=0,
+            skipped_evaluations=0,
+            arbiter_evaluations=0,
+        )
+    ]
+
+
+def test_pipeline_does_not_fail_when_progress_callback_fails() -> None:
+    settings = load_settings(dotenv_path=None, env=BASE_ENV)
+    config = resolve_runtime_config(settings, panel_mode="single")
+    audit = RecordingAudit()
+
+    def fail_progress_callback(progress: BatchProgress) -> None:
+        raise RuntimeError("progress sink unavailable")
+
+    summary = JudgePipeline(
+        InMemoryJudgeRepository(),
+        FakeJudgeClient({"openai/gpt-oss-120b": 5}),
+        audit=audit,
+        progress_callback=fail_progress_callback,
+    ).run([answer()], config)
+
+    assert summary.executed_evaluations == 1
+    assert (
+        "batch_progress_callback_failed",
+        "error=progress sink unavailable",
+    ) in audit.events
 
 
 def test_primary_only_runs_panel_without_arbiter() -> None:

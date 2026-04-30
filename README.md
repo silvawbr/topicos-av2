@@ -113,6 +113,43 @@ O endpoint pode ser Colab, Hugging Face Inference Endpoint, vLLM, llama.cpp, LM 
 
 `.env` é local e não deve ser commitado. `.env.example` é só o template.
 
+## Web UI local para execução auditável
+
+Além da CLI, o projeto inclui uma console Web local para configurar, validar e acompanhar execuções do `run-judge`.
+
+Suba o PostgreSQL e a Web UI pelo Docker Compose:
+
+```bash
+make web-up
+```
+
+Acesse:
+
+```text
+http://127.0.0.1:8000
+```
+
+A Web UI:
+
+- carrega defaults do `.env`;
+- mostra configuração efetiva sem exibir API keys;
+- valida configuração por dry-run;
+- inicia execução real sem chamar a CLI por subprocesso;
+- mostra progresso percentual do batch;
+- exibe o comando CLI equivalente e o caminho do audit log.
+
+Por segurança, o serviço Web é publicado apenas em `127.0.0.1:${WEB_PORT:-8000}`. Se o endpoint do juiz roda no host da máquina e a Web roda em container, `localhost` dentro do container aponta para o próprio container; em macOS/Windows, use `host.docker.internal` quando precisar acessar LM Studio, llama.cpp, Ollama proxy ou serviço similar no host.
+
+Comandos úteis:
+
+```bash
+make web-up
+make web-logs
+make web-down
+```
+
+`make web-up` libera automaticamente a porta configurada em `WEB_PORT` antes de subir a Web UI: para containers Docker que publicam essa porta, executa `docker stop`; para processos locais escutando na porta, tenta `SIGTERM` e depois `SIGKILL` se necessário.
+
 ### Configuração rápida
 
 Se ainda não existe `.env`:
@@ -413,6 +450,9 @@ make db-backup
 make db-status
 make db-psql
 make db-logs
+make web-up
+make web-logs
+make web-down
 make db-down
 make db-reset
 make clean
