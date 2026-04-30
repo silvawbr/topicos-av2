@@ -10,29 +10,37 @@ from tqdm import tqdm
 
 
 DATASET_NAME = "OAB_Exames"
-DATASET_DOMAIN = "Jurídico"
+DATASET_DOMAIN = "Juridico"
 HF_DATASET = "eduagarcia/oab_exams"
+QUESTION_ID_START = 739
+QUESTION_ID_END = 1476
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Importa perguntas do dataset eduagarcia/oab_exams para o PostgreSQL."
+        description="Importa apenas a faixa canonica do dataset eduagarcia/oab_exams."
     )
     parser.add_argument(
-        "--limit",
+        "--start-id",
         type=int,
-        default=2210,
-        help="Quantidade de registros a importar. Use 0 para importar todo o split.",
+        default=QUESTION_ID_START,
+        help="Primeiro id_pergunta canonico a importar. Padrao: 739.",
+    )
+    parser.add_argument(
+        "--end-id",
+        type=int,
+        default=QUESTION_ID_END,
+        help="Ultimo id_pergunta canonico a importar. Padrao: 1476.",
     )
     parser.add_argument(
         "--split",
         default="train",
-        help="Split do Hugging Face Dataset. Padrão: train.",
+        help="Split do Hugging Face Dataset. Padrao: train.",
     )
     parser.add_argument(
         "--truncate",
         action="store_true",
-        help="Limpa perguntas e tabelas dependentes antes da importação.",
+        help="Limpa perguntas e tabelas dependentes antes da importacao.",
     )
     parser.add_argument(
         "--batch-size",
@@ -106,7 +114,7 @@ def normalize_choices(row):
 
 def build_metadata(row):
     metadata = {
-        "tipo_questao": "questão objetiva",
+        "tipo_questao": "questao objetiva",
         "category": row.get("question_type"),
         "origem": "eduagarcia/oab_exams",
     }
@@ -126,8 +134,11 @@ def build_metadata(row):
     return metadata
 
 
-def load_oab_dataset(split, limit):
-    selected_split = split if limit == 0 else f"{split}[:{limit}]"
+def load_oab_dataset(split, start_id, end_id):
+    if start_id <= 0 or end_id < start_id:
+        raise ValueError("Faixa invalida para OAB_Exames.")
+
+    selected_split = f"{split}[{start_id - 1}:{end_id}]"
     return load_dataset(HF_DATASET, split=selected_split)
 
 
@@ -142,11 +153,13 @@ def main():
                     cur.execute("TRUNCATE perguntas RESTART IDENTITY CASCADE;")
 
                 id_dataset = ensure_dataset(cur)
-
-                dataset = load_oab_dataset(args.split, args.limit)
+                dataset = load_oab_dataset(args.split, args.start_id, args.end_id)
                 rows = []
 
-                for row in tqdm(dataset, desc="Preparando perguntas"):
+                for id_pergunta, row in enumerate(
+                    tqdm(dataset, desc="Preparando perguntas"),
+                    start=args.start_id,
+                ):
                     alternativas = normalize_choices(row)
                     alternativas_texto = "\n".join(
                         f"{label}) {texto}" for label, texto in alternativas.items()
@@ -154,24 +167,38 @@ def main():
                     enunciado = f"{row['question']}\n\n{alternativas_texto}"
                     rows.append(
                         (
+                            id_pergunta,
                             id_dataset,
                             enunciado,
                             row["answerKey"],
-                            Json(build_metadata(row), dumps=lambda value: json.dumps(value, ensure_ascii=False)),
+                            Json(
+                                build_metadata(row),
+                                dumps=lambda value: json.dumps(value, ensure_ascii=False),
+                            ),
                         )
                     )
 
                 execute_batch(
                     cur,
                     """
-                    INSERT INTO perguntas (id_dataset, enunciado, resposta_ouro, metadados)
-                    VALUES (%s, %s, %s, %s);
+                    INSERT INTO perguntas (id_pergunta, id_dataset, enunciado, resposta_ouro, metadados)
+                    VALUES (%s, %s, %s, %s, %s);
                     """,
                     rows,
                     page_size=args.batch_size,
                 )
 
-        print(f"Inserção concluída. Total de registros: {len(rows)}")
+                cur.execute(
+                    """
+                    SELECT setval(
+                        'perguntas_id_pergunta_seq',
+                        COALESCE((SELECT MAX(id_pergunta) FROM perguntas), 1),
+                        true
+                    );
+                    """
+                )
+
+        print(f"Insercao concluida. Total de registros: {len(rows)}")
     finally:
         conn.close()
 
