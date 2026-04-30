@@ -161,6 +161,19 @@ def test_web_index_contains_progress_element() -> None:
     assert "Execucoes anteriores" in response.text
     assert 'id="history-table-body"' in response.text
     assert 'id="history-log-content"' in response.text
+    assert 'id="post-run-panel" class="post-run-panel" hidden' in response.text
+    assert 'id="post-run-cards"' in response.text
+    assert 'id="score-distribution-chart"' in response.text
+    assert 'id="judge-failures-chart"' in response.text
+    assert 'id="candidate-average-chart"' in response.text
+    assert 'id="judge-average-chart"' in response.text
+    assert "function buildPostRunStats" in response.text
+    assert "function renderPostRunPanel" in response.text
+    assert "showPercent: true" in response.text
+    assert 'className = "bar-percent"' in response.text
+    assert 'className = `bar-count ${valueTone(value, row, options)}`' in response.text
+    assert "function applyBarTone" in response.text
+    assert "function valueTone" in response.text
 
 
 def test_web_index_contains_endpoint_and_advanced_controls() -> None:
@@ -293,6 +306,9 @@ def test_run_lifecycle_exposes_batch_progress() -> None:
     assert data["evaluation_events"][0]["question_id"] == 10
     assert data["evaluation_events"][0]["candidate_model"] == "modelo-candidato"
     assert data["evaluation_events"][0]["latency_ms"] == 123
+    assert data["started_at"] is not None
+    assert data["finished_at"] is not None
+    assert data["duration"] is not None
 
 
 def test_run_exposes_audit_log_link_and_file_content(tmp_path) -> None:

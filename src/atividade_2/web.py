@@ -88,6 +88,8 @@ class JobState:
     run_id: str
     status: RunStatus
     request: RunJudgeRequest
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
     progress: BatchProgress = field(default_factory=lambda: _initial_progress())
     result: RunJudgeResult | None = None
     error: str | None = None
@@ -166,10 +168,12 @@ class JobRegistry:
             job = self._jobs[run_id]
             if job.cancel_requested:
                 job.status = "cancelled"
+                job.finished_at = datetime.now()
                 if self._active_run_id == run_id:
                     self._active_run_id = None
                 return
             job.status = "running"
+            job.started_at = datetime.now()
 
         def update_progress(progress: BatchProgress) -> None:
             with self._lock:
@@ -195,11 +199,13 @@ class JobRegistry:
             with self._lock:
                 job = self._jobs[run_id]
                 job.status = "failed"
+                job.finished_at = datetime.now()
                 job.error = str(error)
         else:
             with self._lock:
                 job = self._jobs[run_id]
                 job.status = "cancelled" if job.cancel_requested else "completed"
+                job.finished_at = datetime.now()
                 job.result = result
                 job.audit_log = result.audit_log
                 job.command_preview = result.command_preview
@@ -322,6 +328,10 @@ def _serialize_job(job: JobState) -> dict:
     return {
         "run_id": job.run_id,
         "status": job.status,
+        "started_at": job.started_at.isoformat() if job.started_at is not None else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at is not None else None,
+        "duration_seconds": _duration_seconds(job.started_at, job.finished_at, 0),
+        "duration": _format_duration(_duration_seconds(job.started_at, job.finished_at, 0)),
         "progress": asdict(job.progress),
         "audit_log": job.audit_log,
         "audit_log_url": f"/api/runs/{job.run_id}/audit-log" if job.audit_log else None,
@@ -607,6 +617,33 @@ _INDEX_HTML = """
     .audit-log-button-icon { font-size:15px; line-height:1; }
     .audit-log-button:disabled { color:var(--muted); }
     .audit-log-content { min-height:420px; max-height:calc(100vh - 210px); margin:0; overflow:auto; }
+    .post-run-panel { margin-top:18px; border-top:1px solid var(--line); padding-top:16px; }
+    .metric-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px,1fr)); gap:10px; margin:10px 0 16px; }
+    .metric-card { border:1px solid var(--line); border-radius:8px; padding:10px; background:#fbfcfe; min-width:0; }
+    .metric-value { display:block; font-size:22px; font-weight:750; line-height:1.15; overflow-wrap:anywhere; }
+    .metric-label { display:block; color:var(--muted); font-size:12px; margin-top:3px; }
+    .chart-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px,1fr)); gap:14px; }
+    .chart { border:1px solid var(--line); border-radius:8px; padding:12px; min-width:0; }
+    .chart h3 { margin:0 0 10px; font-size:13px; }
+    .bar-row { display:grid; grid-template-columns:minmax(82px,132px) minmax(88px,1fr) 104px; gap:8px; align-items:center; margin:7px 0; font-size:12px; }
+    .bar-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
+    .bar-track { height:14px; border-radius:999px; background:#e5e9f0; overflow:hidden; box-shadow:inset 0 0 0 1px rgba(24,33,47,.03); }
+    .bar-fill { height:100%; min-width:4px; border-radius:999px; background:linear-gradient(90deg, #1769aa, #1d7f4e); }
+    .bar-fill.score-1 { background:#b42318; }
+    .bar-fill.score-2 { background:#d97706; }
+    .bar-fill.score-3 { background:#1769aa; }
+    .bar-fill.score-4 { background:#1d7f4e; }
+    .bar-fill.score-5 { background:#0f766e; }
+    .bar-fill.failed { background:#b42318; }
+    .bar-fill.arbiter { background:#7c3aed; }
+    .bar-fill.none { background:#64748b; }
+    .bar-fill.zero { min-width:0; }
+    .bar-value { display:grid; grid-template-columns:42px 54px; justify-content:end; align-items:center; gap:6px; font-variant-numeric:tabular-nums; color:var(--ink); font-weight:800; white-space:nowrap; font-size:13px; }
+    .bar-count { --pill-fill:#1769aa; --pill-bg:#eaf3fb; --pill-pct:0%; width:42px; text-align:center; border-radius:999px; padding:2px 0; color:var(--accent); background:linear-gradient(90deg, color-mix(in srgb, var(--pill-fill) 26%, white) 0 var(--pill-pct), var(--pill-bg) var(--pill-pct) 100%); }
+    .bar-count.positive { --pill-fill:#1d7f4e; --pill-bg:#e7f7ee; color:var(--ok); }
+    .bar-count.warning { --pill-fill:#9a5b00; --pill-bg:#fff4df; color:var(--warn); }
+    .bar-count.bad { --pill-fill:#b42318; --pill-bg:#fff1f0; color:var(--bad); }
+    .bar-percent { color:var(--muted); font-weight:600; text-align:right; }
     .badge { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:2px 7px; font-size:12px; white-space:nowrap; }
     .badge.success { color:var(--ok); border-color:#b7dfc8; background:#f0fbf4; }
     .badge.failed { color:var(--bad); border-color:#f0b8b2; background:#fff5f5; }
@@ -767,6 +804,32 @@ _INDEX_HTML = """
       <pre id="command-preview"></pre>
       <h2>Resumo / erro</h2>
       <pre id="output"></pre>
+      <div id="post-run-panel" class="post-run-panel" hidden>
+        <h2>Batch finalizado</h2>
+        <div id="post-run-cards" class="metric-grid"></div>
+        <div class="chart-grid">
+          <div class="chart">
+            <h3>Distribuicao de notas 1-5</h3>
+            <div id="score-distribution-chart"></div>
+          </div>
+          <div class="chart">
+            <h3>Falhas por juiz</h3>
+            <div id="judge-failures-chart"></div>
+          </div>
+          <div class="chart">
+            <h3>Arbitragens</h3>
+            <div id="arbitration-chart"></div>
+          </div>
+          <div class="chart">
+            <h3>Media por modelo candidato</h3>
+            <div id="candidate-average-chart"></div>
+          </div>
+          <div class="chart">
+            <h3>Media por juiz</h3>
+            <div id="judge-average-chart"></div>
+          </div>
+        </div>
+      </div>
       <h2 style="margin-top:18px">Tabela dinamica de execucao</h2>
       <div class="table-wrap">
         <table aria-label="Tabela dinamica de execucao">
@@ -1025,7 +1088,175 @@ _INDEX_HTML = """
       setText("arbiters", summary?.arbiter_evaluations ?? data.progress?.arbiter_evaluations);
       if (data.error) setText("output", friendlyErrorMessage(data.error));
       else if (data.result) setText("output", data.result.execution_summary);
+      renderPostRunPanel(data);
       renderExecutionTable(data.evaluation_events || []);
+    }
+
+    function renderPostRunPanel(data) {
+      const panel = document.getElementById("post-run-panel");
+      const status = data.status || "dry-run";
+      const shouldShow = ["completed", "failed", "cancelled"].includes(status) && Boolean(data.result);
+      panel.hidden = !shouldShow;
+      if (!shouldShow) return;
+      const stats = buildPostRunStats(data);
+      renderMetricCards(stats);
+      renderBarChart("score-distribution-chart", stats.scoreDistribution, {scaleMax: 1, showPercent: true, colorByLabel: true});
+      renderBarChart("judge-failures-chart", stats.failuresByJudge, {scaleMax: 1, showPercent: true, tone: "bad"});
+      renderBarChart("arbitration-chart", stats.arbitrations, {scaleMax: 1, showPercent: true, tone: "arbiter"});
+      renderBarChart("candidate-average-chart", stats.averageByCandidate, {scaleMax: 5});
+      renderBarChart("judge-average-chart", stats.averageByJudge, {scaleMax: 5});
+    }
+
+    function buildPostRunStats(data) {
+      const events = data.evaluation_events || [];
+      const summary = data.result?.summary || {};
+      const scoredEvents = events.filter((event) => event.status === "success" && Number.isFinite(Number(event.score)));
+      const failedEvents = events.filter((event) => event.status === "failed");
+      const successCount = events.filter((event) => event.status === "success").length;
+      const scoreDistribution = [1, 2, 3, 4, 5].map((score) => ({
+        label: String(score),
+        value: scoredEvents.filter((event) => Number(event.score) === score).length
+      }));
+      const avgScore = average(scoredEvents.map((event) => Number(event.score)));
+      return {
+        selectedAnswers: summary.selected_answers ?? data.eligibility?.will_process ?? data.progress?.total ?? 0,
+        judgeCalls: events.filter((event) => event.status !== "skipped").length || summary.executed_evaluations || 0,
+        successCount,
+        failedCount: failedEvents.length,
+        arbiterCount: summary.arbiter_evaluations ?? data.progress?.arbiter_evaluations ?? 0,
+        averageScore: avgScore,
+        duration: data.duration || "-",
+        scoreDistribution,
+        failuresByJudge: countBy(failedEvents, (event) => event.judge_model || "sem juiz"),
+        arbitrations: [
+          {label: "acionadas", value: summary.arbiter_evaluations ?? data.progress?.arbiter_evaluations ?? 0},
+          {label: "sem arbitro", value: Math.max(0, (summary.selected_answers ?? data.progress?.total ?? 0) - (summary.arbiter_evaluations ?? data.progress?.arbiter_evaluations ?? 0))}
+        ],
+        averageByCandidate: averageBy(scoredEvents, (event) => event.candidate_model || "sem modelo"),
+        averageByJudge: averageBy(scoredEvents, (event) => event.judge_model || "sem juiz")
+      };
+    }
+
+    function renderMetricCards(stats) {
+      const root = document.getElementById("post-run-cards");
+      root.textContent = "";
+      for (const metric of [
+        ["Respostas selecionadas", stats.selectedAnswers],
+        ["Chamadas de juiz realizadas", stats.judgeCalls],
+        ["Success", stats.successCount],
+        ["Failed", stats.failedCount],
+        ["Arbitragens acionadas", stats.arbiterCount],
+        ["Nota media", formatAverage(stats.averageScore)],
+        ["Tempo total", stats.duration]
+      ]) {
+        const card = document.createElement("div");
+        card.className = "metric-card";
+        const value = document.createElement("span");
+        value.className = "metric-value";
+        value.textContent = display(metric[1]);
+        const label = document.createElement("span");
+        label.className = "metric-label";
+        label.textContent = metric[0];
+        card.appendChild(value);
+        card.appendChild(label);
+        root.appendChild(card);
+      }
+    }
+
+    function renderBarChart(id, rows, options = {}) {
+      const root = document.getElementById(id);
+      root.textContent = "";
+      const values = rows || [];
+      const total = values.reduce((sum, row) => sum + (Number(row.value) || 0), 0);
+      const max = Math.max(options.scaleMax || 0, ...values.map((row) => Number(row.value) || 0));
+      if (!values.length) {
+        const empty = document.createElement("div");
+        empty.className = "muted";
+        empty.textContent = "Sem dados.";
+        root.appendChild(empty);
+        return;
+      }
+      for (const row of values) {
+        const value = Number(row.value) || 0;
+        const line = document.createElement("div");
+        line.className = "bar-row";
+        const label = document.createElement("span");
+        label.className = "bar-label";
+        label.title = row.label;
+        label.textContent = row.label;
+        const track = document.createElement("span");
+        track.className = "bar-track";
+        const fill = document.createElement("span");
+        fill.className = "bar-fill";
+        if (value === 0) fill.classList.add("zero");
+        applyBarTone(fill, row, options);
+        const basis = options.showPercent ? total : max;
+        fill.style.width = `${basis ? Math.round((value / basis) * 100) : 0}%`;
+        track.appendChild(fill);
+        const number = document.createElement("span");
+        number.className = "bar-value";
+        const count = document.createElement("span");
+        count.className = `bar-count ${valueTone(value, row, options)}`;
+        count.style.setProperty("--pill-pct", `${max ? Math.round((value / max) * 100) : 0}%`);
+        count.textContent = Number.isInteger(value) ? String(value) : value.toFixed(1);
+        number.appendChild(count);
+        if (options.showPercent) {
+          const percent = document.createElement("span");
+          percent.className = "bar-percent";
+          percent.textContent = `(${total ? Math.round((value / total) * 100) : 0}%)`;
+          number.appendChild(percent);
+        }
+        line.appendChild(label);
+        line.appendChild(track);
+        line.appendChild(number);
+        root.appendChild(line);
+      }
+    }
+
+    function applyBarTone(fill, row, options) {
+      if (options.colorByLabel && ["1", "2", "3", "4", "5"].includes(String(row.label))) {
+        fill.classList.add(`score-${row.label}`);
+        return;
+      }
+      if (options.tone === "bad") fill.classList.add("failed");
+      else if (options.tone === "arbiter" && row.label === "acionadas") fill.classList.add("arbiter");
+      else if (options.tone === "arbiter") fill.classList.add("none");
+    }
+
+    function valueTone(value, row, options) {
+      if (!value) return "";
+      if (options.tone === "bad") return "bad";
+      if (options.tone === "arbiter" && row.label === "acionadas") return "warning";
+      if (options.colorByLabel && Number(row.label) <= 2) return "bad";
+      if (options.colorByLabel && Number(row.label) >= 4) return "positive";
+      return "";
+    }
+
+    function countBy(events, keyFn) {
+      const counts = new Map();
+      for (const event of events) counts.set(keyFn(event), (counts.get(keyFn(event)) || 0) + 1);
+      return Array.from(counts, ([label, value]) => ({label, value})).sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+    }
+
+    function averageBy(events, keyFn) {
+      const groups = new Map();
+      for (const event of events) {
+        const key = keyFn(event);
+        const current = groups.get(key) || {sum: 0, count: 0};
+        current.sum += Number(event.score);
+        current.count += 1;
+        groups.set(key, current);
+      }
+      return Array.from(groups, ([label, value]) => ({label, value: value.sum / value.count})).sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+    }
+
+    function average(values) {
+      if (!values.length) return null;
+      return values.reduce((sum, value) => sum + value, 0) / values.length;
+    }
+
+    function formatAverage(value) {
+      return value === null || value === undefined ? "-" : value.toFixed(1);
     }
 
     function renderExecutionTable(events) {
