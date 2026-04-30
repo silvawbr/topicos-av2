@@ -100,6 +100,259 @@ outputs/backup/atividade_2_YYYYmmdd_HHMMSS.sql
 
 Backups gerados localmente são ignorados pelo Git. O backup inicial `backup_atividade_2.sql` permanece versionado.
 
+## Running the LLM-as-a-Judge pipeline with a remote model
+
+O banco e a pipeline rodam localmente. O modelo juiz roda em um endpoint HTTP.
+
+```text
+PostgreSQL local -> Python local -> endpoint do juiz -> avaliação salva no PostgreSQL
+```
+
+O endpoint pode ser Colab, Hugging Face Inference Endpoint, vLLM, llama.cpp, LM Studio, proxy do Ollama ou qualquer servidor compatível com OpenAI.
+
+`.env` é local e não deve ser commitado. `.env.example` é só o template.
+
+### Configuração rápida
+
+Se ainda não existe `.env`:
+
+```bash
+cp .env.example .env
+```
+
+Se o `.env` já existe, não sobrescreva. Copie apenas as variáveis novas de `.env.example`.
+
+#### Variáveis que você precisa configurar
+
+Estas dependem do endpoint de cada pessoa:
+
+| Variável | O que colocar |
+|---|---|
+| `REMOTE_JUDGE_BASE_URL` | URL base do endpoint. Ex.: `https://.../v1`. |
+| `REMOTE_JUDGE_API_KEY` | Chave/token do endpoint. Não commit. |
+| `REMOTE_JUDGE_MODEL` | Modelo para smoke test em modo `single`. Use um modelo que seu endpoint suporta. |
+
+Exemplo mínimo:
+
+```env
+JUDGE_PROVIDER=remote_http
+REMOTE_JUDGE_BASE_URL=https://seu-endpoint.example.com/v1
+REMOTE_JUDGE_API_KEY=sua-chave-local
+JUDGE_PANEL_MODE=single
+REMOTE_JUDGE_MODEL=openai/gpt-oss-120b
+REMOTE_JUDGE_OPENAI_COMPATIBLE=true
+```
+
+#### Variáveis que normalmente ficam no padrão
+
+| Variável | Padrão recomendado | Quando mudar |
+|---|---|---|
+| `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/app_dev` | Se seu banco usa outra porta, usuário ou database. |
+| `JUDGE_PROVIDER` | `remote_http` | Não mude por enquanto. |
+| `JUDGE_PANEL_MODE` | `2plus1` | Use `single` para smoke test barato. |
+| `REMOTE_PRIMARY_JUDGE_PANEL` | `gpt-oss-120b,llama-3.3-70b-instruct` | Se o endpoint não tiver esses modelos. |
+| `REMOTE_ARBITER_JUDGE_MODEL` | `m-prometheus-14b` | Se o endpoint não tiver esse modelo. |
+| `JUDGE_ARBITRATION_MIN_DELTA` | `2` | Para arbitragem mais ou menos sensível. |
+| `JUDGE_ALWAYS_RUN_ARBITER` | `false` | Use `true` só para auditoria/amostra. |
+| `JUDGE_EXECUTION_STRATEGY` | `sequential` | Use `parallel` quando o endpoint aceitar concorrência. |
+| `REMOTE_JUDGE_TIMEOUT_SECONDS` | `180` | Para modelos lentos. |
+| `REMOTE_JUDGE_TEMPERATURE` | `0.0` | Mantenha assim para avaliação mais determinística. |
+| `REMOTE_JUDGE_MAX_TOKENS` | `1200` | Se a justificativa vier cortada. |
+| `REMOTE_JUDGE_TOP_P` | `1.0` | Normalmente não precisa mudar. |
+| `REMOTE_JUDGE_OPENAI_COMPATIBLE` | `true` | Use `false` só para endpoint JSON não OpenAI. |
+| `JUDGE_SAVE_RAW_RESPONSE` | `true` | Use `false` se não quiser manter a resposta bruta no run. |
+
+Precedência:
+
+```text
+argumento CLI > .env > default do código > erro de validação
+```
+
+### Modelos juízes selecionados
+
+Aliases aceitos no `.env` e no CLI:
+
+| Alias | Provider model id | Papel |
+|---|---|---|
+| `gpt-oss-120b` | `openai/gpt-oss-120b` | primário |
+| `llama-3.3-70b-instruct` | `meta-llama/Llama-3.3-70B-Instruct` | primário |
+| `m-prometheus-14b` | `Unbabel/M-Prometheus-14B` | árbitro/calibração |
+
+Também é possível passar diretamente um provider model id. Valores sem alias são usados como informados.
+
+### Modos de execução
+
+| Modo | O que faz | Quando usar |
+|---|---|---|
+| `single` | Roda um juiz. | Smoke test, debug ou endpoint com um modelo só. |
+| `primary_only` | Roda o painel primário. | Comparar dois juízes sem árbitro. |
+| `2plus1` | Roda dois primários e chama árbitro se houver divergência. | Execução metodológica principal. |
+| `2plus1 --always-run-arbiter` | Roda os três juízes sempre. | Amostra de auditoria ou apresentação. |
+
+### Execução sequencial ou paralela
+
+Controle chamadas de API em `.env`:
+
+```env
+JUDGE_EXECUTION_STRATEGY=sequential
+```
+
+Use `sequential` para modelo local, pouca VRAM ou endpoint frágil. Use `parallel` para endpoint remoto que aceita concorrência.
+
+No modo `2plus1`, só os dois primários podem rodar em paralelo. O árbitro sempre roda depois, porque depende da diferença entre as notas.
+
+Override por execução:
+
+```bash
+.venv/bin/python -m atividade_2.cli run-judge \
+  --panel-mode primary_only \
+  --primary-judge-panel gpt-oss-120b,llama-3.3-70b-instruct \
+  --judge-execution-strategy parallel \
+  --dataset J2 \
+  --limit 10
+```
+
+### Exemplos
+
+Validar configuração sem chamar banco nem endpoint:
+
+```bash
+.venv/bin/python -m atividade_2.cli run-judge \
+  --panel-mode single \
+  --judge-model openai/gpt-oss-120b \
+  --dataset J2 \
+  --limit 1 \
+  --dry-run
+```
+
+Smoke test real com uma questão objetiva:
+
+```bash
+.venv/bin/python -m atividade_2.cli run-judge \
+  --panel-mode single \
+  --dataset J2 \
+  --limit 1
+```
+
+Smoke test real com uma peça/discursiva:
+
+```bash
+.venv/bin/python -m atividade_2.cli run-judge \
+  --panel-mode single \
+  --dataset J1 \
+  --limit 1
+```
+
+Rodar exatamente dois juízes:
+
+```bash
+.venv/bin/python -m atividade_2.cli run-judge \
+  --panel-mode primary_only \
+  --primary-judge-panel gpt-oss-120b,llama-3.3-70b-instruct \
+  --dataset J2 \
+  --limit 10
+```
+
+Rodar o modo `2plus1` padrão do `.env`:
+
+```bash
+.venv/bin/python -m atividade_2.cli run-judge \
+  --panel-mode 2plus1 \
+  --dataset J2 \
+  --limit 10
+```
+
+Rodar os três juízes sempre:
+
+```bash
+.venv/bin/python -m atividade_2.cli run-judge \
+  --panel-mode 2plus1 \
+  --always-run-arbiter \
+  --dataset J2 \
+  --limit 20
+```
+
+### Audit log
+
+Toda execução de `run-judge` grava um log detalhado em arquivo e também mostra o progresso no terminal.
+
+- Terminal: mostra cada etapa principal, com pontos dinâmicos em operações longas quando o terminal suporta animação.
+- Arquivo: grava timestamps UTC, configuração resolvida sem segredos, seleção de respostas, chamadas por resposta/modelo, parsing, persistência, skips e resumo final.
+- Padrão: `outputs/audit/judge_run_YYYYmmdd_HHMMSS.log`.
+- Logs locais em `outputs/audit/*.log` são ignorados pelo Git.
+
+Escolha um caminho explícito:
+
+```bash
+.venv/bin/python -m atividade_2.cli run-judge \
+  --panel-mode single \
+  --judge-model m-prometheus-14b \
+  --dataset J2 \
+  --limit 1 \
+  --audit-log outputs/audit/smoke_j2.log
+```
+
+Desative a animação de terminal quando quiser saída estável para captura em arquivo:
+
+```bash
+.venv/bin/python -m atividade_2.cli run-judge \
+  --panel-mode single \
+  --judge-model m-prometheus-14b \
+  --dataset J2 \
+  --limit 1 \
+  --no-audit-animation
+```
+
+### Colab e endpoints compatíveis
+
+Para usar Colab, exponha uma URL HTTP compatível com OpenAI e configure somente no `.env`:
+
+```env
+REMOTE_JUDGE_BASE_URL=https://seu-endpoint-colab.example.com/v1
+REMOTE_JUDGE_API_KEY=sua-chave-local
+REMOTE_JUDGE_OPENAI_COMPATIBLE=true
+```
+
+O mesmo padrão vale para vLLM, llama.cpp, LM Studio ou proxy Ollama. Trocar endpoint e trocar modelos são preocupações separadas: normalmente o endpoint fica fixo em `.env`, e o modelo ou painel é selecionado por CLI.
+
+### Persistência
+
+Cada juiz executado gera uma linha individual em `avaliacoes_juiz`. O campo `chain_of_thought` é usado como justificativa auditável curta, não como raciocínio privado. A pipeline adiciona colunas opcionais de metadados de painel (`papel_juiz`, `rodada_julgamento`, `motivo_acionamento`) se o schema restaurado ainda não as tiver.
+
+### Backup e restore
+
+Antes de uma execução completa:
+
+```bash
+make db-up
+make db-migrate-or-create
+make db-restore-validate
+```
+
+Depois de uma execução relevante:
+
+```bash
+make db-backup
+```
+
+Para restaurar do zero, use o fluxo recomendado do projeto:
+
+```bash
+make db-reset
+make db-up
+make db-migrate-or-create
+make db-restore-validate
+```
+
+### Troubleshooting
+
+- `REMOTE_JUDGE_BASE_URL is required`: copie as variáveis novas de `.env.example` para seu `.env`.
+- `REMOTE_JUDGE_API_KEY is required`: defina uma chave local para o endpoint. Não use chave real em `.env.example`.
+- `Remote judge response did not contain model text`: confirme se o endpoint responde no formato OpenAI `/chat/completions` ou defina `REMOTE_JUDGE_OPENAI_COMPATIBLE=false`.
+- `Judge response contains invalid JSON`: o modelo não seguiu o contrato; rode com `--limit 1`, ajuste o endpoint/modelo e repita.
+- Avaliações duplicadas não são regravadas para o mesmo conjunto resposta/modelo/papel/modo; use outro modelo ou limpe intencionalmente o banco se precisar reconstruir uma execução.
+- Use sempre `.venv/bin/python`, nunca `python` ou `python3`, para comandos do projeto.
+
 ## Comandos Make
 
 ```bash
@@ -136,8 +389,6 @@ make db-down
 
 ## Fora de Escopo Neste Estágio
 
-- execução de modelos LLM;
-- pipeline LLM-as-a-Judge;
 - ORM;
 - Alembic/migrations;
 - importadores de datasets;
