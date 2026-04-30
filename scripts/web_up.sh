@@ -82,6 +82,6 @@ stop_host_processes_on_port() {
 stop_containers_on_port
 stop_host_processes_on_port
 
-docker compose --env-file ".env" up -d judge-web
+docker compose --env-file ".env" up -d --build --force-recreate judge-web
 
 echo "Web UI is available at http://127.0.0.1:${WEB_PORT}"

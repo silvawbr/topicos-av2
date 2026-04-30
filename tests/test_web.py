@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
-from atividade_2.contracts import BatchProgress, EligibilitySummary, PipelineSummary
+from atividade_2.contracts import BatchProgress, EligibilitySummary, EvaluationProgress, PipelineSummary
 from atividade_2.run_judge_service import RunJudgeResult
 from atividade_2.web import create_app
 
@@ -46,11 +46,49 @@ class FakeRunJudgeService:
             command_preview=".venv/bin/python -m atividade_2.cli run-judge --dataset J2",
         )
 
-    def run(self, request, *, progress_callback=None, on_resolved=None, eligibility_callback=None):
+    def run(
+        self,
+        request,
+        *,
+        progress_callback=None,
+        on_resolved=None,
+        eligibility_callback=None,
+        evaluation_callback=None,
+    ):
         self.requests.append(request)
         eligibility = EligibilitySummary(missing=83, failed=7, successful=240, batch_size=1, will_process=1)
         if eligibility_callback is not None and not request.dry_run:
             eligibility_callback(eligibility)
+        if evaluation_callback is not None and not request.dry_run:
+            base_event = {
+                "dataset": "J2",
+                "question_id": 10,
+                "answer_id": 20,
+                "candidate_model": "modelo-candidato",
+                "judge_model": "openai/gpt-oss-120b",
+                "role": "principal",
+                "panel_mode": "single",
+                "trigger_reason": "single:single_mode",
+            }
+            evaluation_callback(
+                EvaluationProgress(
+                    status="running",
+                    **base_event,
+                    prompt="prompt usado",
+                )
+            )
+            evaluation_callback(
+                EvaluationProgress(
+                    status="success",
+                    **base_event,
+                    score=5,
+                    arbiter_triggered=None,
+                    latency_ms=123,
+                    prompt="prompt usado",
+                    raw_response='{"score":5}',
+                    rationale="justificativa curta",
+                )
+            )
         if progress_callback is not None:
             progress_callback(
                 BatchProgress(
@@ -86,7 +124,15 @@ class BlockingRunJudgeService(FakeRunJudgeService):
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def run(self, request, *, progress_callback=None, on_resolved=None, eligibility_callback=None):
+    def run(
+        self,
+        request,
+        *,
+        progress_callback=None,
+        on_resolved=None,
+        eligibility_callback=None,
+        evaluation_callback=None,
+    ):
         self.started.set()
         self.release.wait(timeout=2)
         return super().run(
@@ -94,6 +140,7 @@ class BlockingRunJudgeService(FakeRunJudgeService):
             progress_callback=progress_callback,
             on_resolved=on_resolved,
             eligibility_callback=eligibility_callback,
+            evaluation_callback=evaluation_callback,
         )
 
 
@@ -105,6 +152,7 @@ def test_web_index_contains_progress_element() -> None:
     assert response.status_code == 200
     assert '<progress id="batch-progress"' in response.text
     assert 'id="eligible-missing"' in response.text
+    assert 'id="execution-table-body"' in response.text
     assert "/api/runs/" in response.text
 
 
@@ -231,6 +279,11 @@ def test_run_lifecycle_exposes_batch_progress() -> None:
     assert data["eligibility"]["successful"] == 240
     assert data["eligibility"]["will_process"] == 1
     assert data["result"]["summary"]["executed_evaluations"] == 1
+    assert len(data["evaluation_events"]) == 1
+    assert data["evaluation_events"][0]["status"] == "success"
+    assert data["evaluation_events"][0]["question_id"] == 10
+    assert data["evaluation_events"][0]["candidate_model"] == "modelo-candidato"
+    assert data["evaluation_events"][0]["latency_ms"] == 123
 
 
 def test_run_exposes_audit_log_link_and_file_content(tmp_path) -> None:

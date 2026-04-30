@@ -15,6 +15,7 @@ from .audit import AuditLogger
 from .config import ConfigurationError, load_settings, resolve_runtime_config
 from .contracts import (
     BatchProgress,
+    EvaluationProgress,
     EligibilitySummary,
     JudgeSettings,
     ModelSpec,
@@ -174,6 +175,7 @@ class RunJudgeService:
         on_resolved: Callable[[ResolvedRun], None] | None = None,
         progress_callback: Callable[[BatchProgress], None] | None = None,
         eligibility_callback: Callable[[EligibilitySummary], None] | None = None,
+        evaluation_callback: Callable[[EvaluationProgress], None] | None = None,
     ) -> RunJudgeResult:
         """Run or dry-run the judge pipeline."""
         audit_path = _resolve_audit_path(request.audit_log)
@@ -291,6 +293,7 @@ class RunJudgeService:
                         client,
                         audit=audit,
                         progress_callback=report_progress,
+                        evaluation_callback=evaluation_callback,
                     ).run(answers, runtime_config)
                 eligibility = repository.summarize_eligibility(
                     dataset=request.dataset,

@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .config import ConfigurationError
-from .contracts import BatchProgress, EligibilitySummary, PipelineSummary
+from .contracts import BatchProgress, EligibilitySummary, EvaluationProgress, PipelineSummary
 from .judge_clients.remote_http import RemoteJudgeError
 from .parser import JudgeParseError
 from .run_judge_service import RunJudgeRequest, RunJudgeResult, RunJudgeService
@@ -85,6 +85,7 @@ class JobState:
     audit_log: str | None = None
     command_preview: str | None = None
     eligibility: EligibilitySummary | None = None
+    evaluation_events: list[EvaluationProgress] = field(default_factory=list)
 
 
 class JobRegistry:
@@ -133,11 +134,16 @@ class JobRegistry:
             with self._lock:
                 self._jobs[run_id].eligibility = eligibility
 
+        def update_evaluation(evaluation: EvaluationProgress) -> None:
+            with self._lock:
+                _upsert_evaluation_event(self._jobs[run_id].evaluation_events, evaluation)
+
         try:
             result = self.service.run(
                 job.request,
                 progress_callback=update_progress,
                 eligibility_callback=update_eligibility,
+                evaluation_callback=update_evaluation,
             )
         except (ConfigurationError, RemoteJudgeError, JudgeParseError, RuntimeError, ValueError) as error:
             with self._lock:
@@ -230,6 +236,7 @@ def _serialize_job(job: JobState) -> dict:
         "audit_log_url": f"/api/runs/{job.run_id}/audit-log" if job.audit_log else None,
         "command_preview": job.command_preview,
         "eligibility": asdict(job.eligibility) if job.eligibility is not None else None,
+        "evaluation_events": [asdict(event) for event in job.evaluation_events],
         "error": job.error,
         "result": _serialize_result(job.result) if job.result is not None else None,
     }
@@ -251,6 +258,28 @@ def _serialize_summary(summary: PipelineSummary | None) -> dict | None:
     if summary is None:
         return None
     return asdict(summary)
+
+
+def _upsert_evaluation_event(events: list[EvaluationProgress], event: EvaluationProgress) -> None:
+    event_key = _evaluation_event_key(event)
+    for index, existing in enumerate(events):
+        if _evaluation_event_key(existing) == event_key:
+            events[index] = event
+            return
+    events.append(event)
+
+
+def _evaluation_event_key(event: EvaluationProgress) -> tuple:
+    return (
+        event.dataset,
+        event.question_id,
+        event.answer_id,
+        event.candidate_model,
+        event.judge_model,
+        event.role,
+        event.panel_mode,
+        event.trigger_reason,
+    )
 
 
 def _initial_progress() -> BatchProgress:
@@ -277,8 +306,9 @@ _INDEX_HTML = """
     body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--ink); background:var(--bg); }
     header { padding:20px 28px 12px; border-bottom:1px solid var(--line); background:#fff; }
     h1 { margin:0 0 6px; font-size:22px; letter-spacing:0; }
-    main { max-width:1180px; margin:0 auto; padding:20px; display:grid; grid-template-columns: 380px 1fr; gap:18px; }
+    main { width:min(100%, 1440px); margin:0 auto; padding:20px; display:grid; grid-template-columns: minmax(320px,380px) minmax(0,1fr); gap:18px; }
     section, aside { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; }
+    section, aside { min-width:0; }
     aside { padding-bottom:82px; }
     h2 { font-size:15px; margin:0 0 12px; }
     label { display:grid; gap:5px; margin:10px 0; color:var(--muted); font-size:12px; }
@@ -305,14 +335,27 @@ _INDEX_HTML = """
     .presets { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px; }
     .presets button { min-height:32px; font-size:12px; }
     .status { font-size:13px; color:var(--muted); }
-    pre { overflow:auto; background:#101828; color:#f9fafb; border-radius:6px; padding:12px; min-height:76px; white-space:pre-wrap; }
+    pre { max-width:100%; overflow:auto; background:#101828; color:#f9fafb; border-radius:6px; padding:12px; min-height:76px; white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; }
     progress { width:100%; height:22px; accent-color:var(--accent); }
     table { width:100%; border-collapse:collapse; margin-top:12px; font-size:13px; }
     th, td { text-align:left; border-bottom:1px solid var(--line); padding:8px; }
+    .table-wrap { width:100%; max-width:100%; overflow:auto; border:1px solid var(--line); border-radius:8px; margin-top:12px; }
+    .table-wrap table { min-width:1180px; margin-top:0; }
+    .badge { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:2px 7px; font-size:12px; white-space:nowrap; }
+    .badge.success { color:var(--ok); border-color:#b7dfc8; background:#f0fbf4; }
+    .badge.failed { color:var(--bad); border-color:#f0b8b2; background:#fff5f5; }
+    .badge.running { color:var(--accent); border-color:#b9d5eb; background:#f2f8fd; }
+    .badge.skipped { color:var(--warn); border-color:#ead0a6; background:#fff8eb; }
+    .detail-button { min-height:30px; padding:0 9px; border-color:var(--line); background:#fff; color:var(--accent); font-size:12px; }
+    dialog { width:min(900px, calc(100vw - 28px)); border:1px solid var(--line); border-radius:8px; padding:0; }
+    dialog::backdrop { background:rgba(16,24,40,.42); }
+    .dialog-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 14px; border-bottom:1px solid var(--line); }
+    .dialog-body { padding:14px; }
+    .dialog-body h3 { margin:12px 0 6px; font-size:13px; }
     .ok { color:var(--ok); }
     .bad { color:var(--bad); }
     .muted { color:var(--muted); }
-    @media (max-width: 860px) { main { grid-template-columns:1fr; } }
+    @media (max-width: 860px) { main { grid-template-columns:minmax(0,1fr); padding:12px; } }
   </style>
 </head>
 <body>
@@ -453,14 +496,54 @@ _INDEX_HTML = """
       <pre id="command-preview"></pre>
       <h2>Resumo / erro</h2>
       <pre id="output"></pre>
+      <h2 style="margin-top:18px">Tabela dinamica de execucao</h2>
+      <div class="table-wrap">
+        <table aria-label="Tabela dinamica de execucao">
+          <thead>
+            <tr>
+              <th>status</th>
+              <th>dataset</th>
+              <th>id_pergunta</th>
+              <th>modelo_candidato</th>
+              <th>juiz</th>
+              <th>papel</th>
+              <th>nota</th>
+              <th>delta</th>
+              <th>arbitro acionado?</th>
+              <th>motivo_acionamento</th>
+              <th>latencia</th>
+              <th>erro</th>
+              <th>ver detalhes</th>
+            </tr>
+          </thead>
+          <tbody id="execution-table-body">
+            <tr><td colspan="13" class="muted">Aguardando execucao.</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
   </main>
+  <dialog id="details-dialog">
+    <div class="dialog-head">
+      <strong id="details-title">Detalhes da avaliacao</strong>
+      <button class="secondary" id="details-close" type="button">Fechar</button>
+    </div>
+    <div class="dialog-body">
+      <h3>Prompt</h3>
+      <pre id="details-prompt"></pre>
+      <h3>Resposta do juiz</h3>
+      <pre id="details-response"></pre>
+      <h3>Justificativa</h3>
+      <pre id="details-rationale"></pre>
+    </div>
+  </dialog>
   <script>
     let csrfToken = "";
     let pollTimer = null;
 
     function value(id) { return document.getElementById(id).value; }
     function setText(id, text) { document.getElementById(id).textContent = text ?? "-"; }
+    function display(value) { return value === null || value === undefined || value === "" ? "-" : value; }
 
     function renderAuditLog(data) {
       const cell = document.getElementById("audit-log");
@@ -546,6 +629,88 @@ _INDEX_HTML = """
       setText("arbiters", summary?.arbiter_evaluations ?? data.progress?.arbiter_evaluations);
       if (data.error) setText("output", data.error);
       else if (data.result) setText("output", data.result.execution_summary);
+      renderExecutionTable(data.evaluation_events || []);
+    }
+
+    function renderExecutionTable(events) {
+      const body = document.getElementById("execution-table-body");
+      body.textContent = "";
+      if (!events.length) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 13;
+        cell.className = "muted";
+        cell.textContent = "Aguardando execucao.";
+        row.appendChild(cell);
+        body.appendChild(row);
+        return;
+      }
+      events.forEach((event, index) => {
+        const row = document.createElement("tr");
+        appendStatusCell(row, event.status);
+        for (const value of [
+          event.dataset,
+          event.question_id,
+          event.candidate_model,
+          event.judge_model,
+          normalizeRole(event.role),
+          event.score,
+          event.delta,
+          formatBoolean(event.arbiter_triggered),
+          event.trigger_reason,
+          formatLatency(event.latency_ms),
+          event.error
+        ]) appendCell(row, display(value));
+        const detailsCell = document.createElement("td");
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "detail-button";
+        button.textContent = "Detalhes";
+        button.onclick = () => openDetails(event, index);
+        detailsCell.appendChild(button);
+        row.appendChild(detailsCell);
+        body.appendChild(row);
+      });
+    }
+
+    function appendCell(row, value) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.appendChild(cell);
+    }
+
+    function appendStatusCell(row, status) {
+      const cell = document.createElement("td");
+      const badge = document.createElement("span");
+      badge.className = `badge ${status || ""}`;
+      badge.textContent = status || "-";
+      cell.appendChild(badge);
+      row.appendChild(cell);
+    }
+
+    function normalizeRole(role) {
+      if (role === "principal") return "primary";
+      if (role === "controle") return "secondary";
+      if (role === "arbitro") return "arbiter";
+      return role;
+    }
+
+    function formatBoolean(value) {
+      if (value === true) return "sim";
+      if (value === false) return "nao";
+      return "-";
+    }
+
+    function formatLatency(value) {
+      return value === null || value === undefined ? "-" : `${value} ms`;
+    }
+
+    function openDetails(event, index) {
+      setText("details-title", `Detalhes da avaliacao #${index + 1} - resposta ${event.answer_id || "-"}`);
+      setText("details-prompt", event.prompt || "-");
+      setText("details-response", event.raw_response || "-");
+      setText("details-rationale", event.rationale || event.error || "-");
+      document.getElementById("details-dialog").showModal();
     }
 
     function renderStatusIcon(status) {
@@ -649,6 +814,7 @@ _INDEX_HTML = """
         button.setAttribute("aria-pressed", String(!showing));
       };
     }
+    document.getElementById("details-close").onclick = () => document.getElementById("details-dialog").close();
 
     document.getElementById("dry-run").onclick = async () => {
       try {

@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 from atividade_2.config import load_settings, resolve_runtime_config
-from atividade_2.contracts import BatchProgress, CandidateAnswerContext, JudgeRawResponse
+from atividade_2.contracts import BatchProgress, CandidateAnswerContext, EvaluationProgress, JudgeRawResponse
 from atividade_2.pipeline import JudgePipeline
 from atividade_2.repositories import InMemoryJudgeRepository
 
@@ -138,6 +138,29 @@ def test_pipeline_reports_batch_progress_after_each_answer() -> None:
             arbiter_evaluations=0,
         ),
     ]
+
+
+def test_pipeline_reports_evaluation_rows_for_web_table() -> None:
+    settings = load_settings(dotenv_path=None, env=BASE_ENV)
+    config = resolve_runtime_config(settings, panel_mode="single")
+    repo = InMemoryJudgeRepository()
+    client = FakeJudgeClient({"openai/gpt-oss-120b": 5})
+    evaluation_events: list[EvaluationProgress] = []
+
+    JudgePipeline(repo, client, evaluation_callback=evaluation_events.append).run([answer()], config)
+
+    assert [event.status for event in evaluation_events] == ["running", "success"]
+    success = evaluation_events[-1]
+    assert success.dataset == "OAB_Exames"
+    assert success.question_id == 1
+    assert success.candidate_model == "candidate"
+    assert success.judge_model == "openai/gpt-oss-120b"
+    assert success.role == "principal"
+    assert success.score == 5
+    assert success.latency_ms == 1
+    assert success.prompt
+    assert success.raw_response == '{"score": 5, "rationale": "nota 5"}'
+    assert success.rationale == "nota 5"
 
 
 def test_pipeline_reports_complete_progress_for_empty_batch() -> None:

@@ -159,3 +159,26 @@ class BatchProgress:
     executed_evaluations: int
     skipped_evaluations: int
     arbiter_evaluations: int
+
+
+@dataclass(frozen=True)
+class EvaluationProgress:
+    """Per-evaluation progress row for audit-oriented Web UI execution tables."""
+
+    status: Literal["pending", "running", "success", "failed", "skipped"]
+    dataset: str
+    question_id: int
+    answer_id: int
+    candidate_model: str
+    judge_model: str
+    role: StoredJudgeRole
+    panel_mode: PanelMode
+    score: int | None = None
+    delta: int | None = None
+    arbiter_triggered: bool | None = None
+    trigger_reason: str | None = None
+    latency_ms: int | None = None
+    error: str | None = None
+    prompt: str | None = None
+    raw_response: str | None = None
+    rationale: str | None = None
