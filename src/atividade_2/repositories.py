@@ -38,6 +38,15 @@ class JudgeRepositoryProtocol(Protocol):
     def persist_evaluation(self, record: EvaluationRecord) -> None:
         """Persist a successful evaluation."""
 
+    def select_pending_candidate_answers(
+        self,
+        *,
+        dataset: str,
+        batch_size: int,
+        required_evaluations: Iterable[tuple[ModelSpec, StoredJudgeRole, str]],
+    ) -> list[CandidateAnswerContext]:
+        """Select AV1 answers still missing at least one required successful evaluation."""
+
 
 class JudgeRepository:
     """SQL repository using the existing AV2 PostgreSQL schema."""
@@ -52,6 +61,10 @@ class JudgeRepository:
                 cursor.execute("ALTER TABLE avaliacoes_juiz ADD COLUMN IF NOT EXISTS papel_juiz VARCHAR(20);")
                 cursor.execute("ALTER TABLE avaliacoes_juiz ADD COLUMN IF NOT EXISTS rodada_julgamento VARCHAR(30);")
                 cursor.execute("ALTER TABLE avaliacoes_juiz ADD COLUMN IF NOT EXISTS motivo_acionamento TEXT;")
+                cursor.execute(
+                    "ALTER TABLE avaliacoes_juiz "
+                    "ADD COLUMN IF NOT EXISTS status_avaliacao VARCHAR(20) DEFAULT 'success';"
+                )
 
     def select_candidate_answers(self, *, dataset: str, limit: int | None) -> list[CandidateAnswerContext]:
         """Select AV1 answers with question/reference context."""
@@ -100,6 +113,79 @@ class JudgeRepository:
             for row in rows
         ]
 
+    def select_pending_candidate_answers(
+        self,
+        *,
+        dataset: str,
+        batch_size: int,
+        required_evaluations: Iterable[tuple[ModelSpec, StoredJudgeRole, str]],
+    ) -> list[CandidateAnswerContext]:
+        """Select candidate answers with at least one missing required evaluation."""
+        required = tuple(required_evaluations)
+        if not required:
+            return []
+        model_ids = [self.ensure_judge_model(model) for model, _, _ in required]
+        values_sql = ", ".join(["(%s, %s, %s)"] * len(required))
+        required_params: list[Any] = []
+        for model_id, (_, role, panel_mode) in zip(model_ids, required, strict=True):
+            required_params.extend([model_id, role, f"{panel_mode}:%"])
+
+        dataset_name = DATASET_ALIASES.get(dataset.upper(), dataset)
+        params: list[Any] = [*required_params, dataset_name, batch_size]
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                WITH required_evaluations(id_modelo_juiz, papel_juiz, motivo_pattern) AS (
+                    VALUES {values_sql}
+                )
+                SELECT
+                    r.id_resposta,
+                    p.id_pergunta,
+                    d.nome_dataset,
+                    p.enunciado,
+                    p.resposta_ouro,
+                    r.texto_resposta,
+                    m.nome_modelo,
+                    COALESCE(p.metadados, '{{}}'::jsonb)
+                FROM respostas_atividade_1 r
+                JOIN perguntas p ON p.id_pergunta = r.id_pergunta
+                JOIN datasets d ON d.id_dataset = p.id_dataset
+                JOIN modelos m ON m.id_modelo = r.id_modelo
+                WHERE d.nome_dataset = %s
+                  AND EXISTS (
+                      SELECT 1
+                      FROM required_evaluations required
+                      WHERE NOT EXISTS (
+                          SELECT 1
+                          FROM avaliacoes_juiz a
+                          WHERE a.id_resposta_ativa1 = r.id_resposta
+                            AND a.id_modelo_juiz = required.id_modelo_juiz
+                            AND COALESCE(a.papel_juiz, '') = required.papel_juiz
+                            AND COALESCE(a.motivo_acionamento, '') LIKE required.motivo_pattern
+                            AND COALESCE(a.status_avaliacao, 'success') = 'success'
+                      )
+                  )
+                ORDER BY r.id_resposta
+                LIMIT %s;
+                """,
+                params,
+            )
+            rows = cursor.fetchall()
+
+        return [
+            CandidateAnswerContext(
+                answer_id=row[0],
+                question_id=row[1],
+                dataset_name=row[2],
+                question_text=row[3],
+                reference_answer=row[4],
+                candidate_answer=row[5],
+                candidate_model=row[6],
+                metadata=_normalize_metadata(row[7]),
+            )
+            for row in rows
+        ]
+
     def evaluation_exists(
         self,
         answer_id: int,
@@ -126,6 +212,7 @@ class JudgeRepository:
                   AND id_modelo_juiz = %s
                   AND COALESCE(papel_juiz, '') = %s
                   AND COALESCE(motivo_acionamento, '') LIKE %s
+                  AND COALESCE(status_avaliacao, 'success') = 'success'
                 ORDER BY id_avaliacao DESC
                 LIMIT 1;
                 """,
@@ -150,9 +237,10 @@ class JudgeRepository:
                             chain_of_thought,
                             papel_juiz,
                             rodada_julgamento,
-                            motivo_acionamento
+                            motivo_acionamento,
+                            status_avaliacao
                         )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
                     """,
                     (
                         record.answer_id,
@@ -164,6 +252,7 @@ class JudgeRepository:
                         record.stored_role,
                         _round_for_role(record.stored_role),
                         f"{record.panel_mode}:{record.trigger_reason}",
+                        "success",
                     ),
                 )
 
@@ -250,3 +339,12 @@ class InMemoryJudgeRepository:
 
     def extend(self, records: Iterable[EvaluationRecord]) -> None:
         self.records.extend(records)
+
+    def select_pending_candidate_answers(
+        self,
+        *,
+        dataset: str,
+        batch_size: int,
+        required_evaluations: Iterable[tuple[ModelSpec, StoredJudgeRole, str]],
+    ) -> list[CandidateAnswerContext]:
+        return []

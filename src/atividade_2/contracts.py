@@ -53,6 +53,7 @@ class JudgeSettings:
     remote_judge_openai_compatible: bool
     judge_save_raw_response: bool
     judge_execution_strategy: JudgeExecutionStrategy
+    judge_batch_size: int
 
 
 @dataclass(frozen=True)

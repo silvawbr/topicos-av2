@@ -78,6 +78,7 @@ CREATE TABLE avaliacoes_juiz (
     prompt_juiz TEXT NOT NULL,
     rubrica_utilizada TEXT NOT NULL,
     chain_of_thought TEXT NOT NULL,
+    status_avaliacao VARCHAR(20) DEFAULT 'success',
 
     data_avaliacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from .audit import AuditLogger
 from .config import ConfigurationError, load_settings, resolve_runtime_config
-from .contracts import RuntimeJudgeConfig
+from .contracts import ModelSpec, RuntimeJudgeConfig, StoredJudgeRole
 from .db import connect
 from .judge_clients.remote_http import RemoteHttpJudgeClient, RemoteJudgeError
 from .model_aliases import format_model_mapping
@@ -57,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=10,
         help="Maximum candidate answers to evaluate.",
+    )
+    run_judge.add_argument(
+        "--batch-size",
+        type=_positive_int,
+        help="Maximum pending candidate answers to evaluate. Defaults to JUDGE_BATCH_SIZE or 10.",
     )
     run_judge.add_argument(
         "--dry-run",
@@ -115,8 +120,10 @@ def run_judge_command(args: argparse.Namespace) -> int:
                 always_run_arbiter=args.always_run_arbiter,
                 execution_strategy=args.judge_execution_strategy,
             )
+        batch_size = args.batch_size or settings.judge_batch_size
         summary_text = format_execution_summary(runtime_config)
         print(summary_text)
+        print(f"Batch size: {batch_size}")
         print(f"Audit log: {audit.file_path}")
         audit.file_event("execution_summary", summary_text.replace("\n", " | "))
         if args.dry_run:
@@ -131,10 +138,14 @@ def run_judge_command(args: argparse.Namespace) -> int:
             with audit.step("Ensuring judge metadata schema"):
                 repository.ensure_schema()
             with audit.step(
-                f"Selecting candidate answers for {args.dataset}",
-                detail=f"dataset={args.dataset} limit={args.limit}",
+                f"Selecting pending candidate answers for {args.dataset}",
+                detail=f"dataset={args.dataset} batch_size={batch_size}",
             ):
-                answers = repository.select_candidate_answers(dataset=args.dataset, limit=args.limit)
+                answers = repository.select_pending_candidate_answers(
+                    dataset=args.dataset,
+                    batch_size=batch_size,
+                    required_evaluations=_required_evaluations(runtime_config),
+                )
             audit.file_event("answers_selected", f"count={len(answers)}")
             client = RemoteHttpJudgeClient(settings)
             with audit.step(
@@ -226,6 +237,16 @@ def _resolve_audit_path(raw_path: str | None) -> Path:
 
 def _present(value: str | None) -> str:
     return "provided" if value else "not_provided"
+
+
+def _required_evaluations(config: RuntimeJudgeConfig) -> tuple[tuple[ModelSpec, StoredJudgeRole, str], ...]:
+    if config.panel_mode == "single":
+        assert config.single_judge is not None
+        return ((config.single_judge, "principal", config.panel_mode),)
+    return tuple(
+        (model, role, config.panel_mode)
+        for model, role in zip(config.primary_panel, ("principal", "controle"), strict=False)
+    )
 
 
 def _format_model_with_endpoint(config: RuntimeJudgeConfig, model, endpoint_key: str) -> str:
