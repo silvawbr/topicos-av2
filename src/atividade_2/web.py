@@ -31,6 +31,19 @@ class RunPayload(BaseModel):
     secondary_judge_model: str | None = None
     arbiter_judge_model: str | None = None
     always_run_arbiter: bool = False
+    remote_judge_base_url: str | None = None
+    remote_judge_api_key: str | None = None
+    remote_secondary_judge_base_url: str | None = None
+    remote_secondary_judge_api_key: str | None = None
+    remote_arbiter_judge_base_url: str | None = None
+    remote_arbiter_judge_api_key: str | None = None
+    judge_arbitration_min_delta: int | None = Field(default=None, ge=0)
+    remote_judge_timeout_seconds: int | None = Field(default=None, ge=1)
+    remote_judge_temperature: float | None = Field(default=None, ge=0)
+    remote_judge_max_tokens: int | None = Field(default=None, ge=1)
+    remote_judge_top_p: float | None = Field(default=None, ge=0)
+    remote_judge_openai_compatible: bool | None = None
+    judge_save_raw_response: bool | None = None
 
     def to_request(self, *, dry_run: bool) -> RunJudgeRequest:
         return RunJudgeRequest(
@@ -42,6 +55,19 @@ class RunPayload(BaseModel):
             judge_execution_strategy=self.judge_execution_strategy,
             dataset=self.dataset,
             batch_size=self.batch_size,
+            remote_judge_base_url=self.remote_judge_base_url or None,
+            remote_judge_api_key=self.remote_judge_api_key or None,
+            remote_secondary_judge_base_url=self.remote_secondary_judge_base_url or None,
+            remote_secondary_judge_api_key=self.remote_secondary_judge_api_key or None,
+            remote_arbiter_judge_base_url=self.remote_arbiter_judge_base_url or None,
+            remote_arbiter_judge_api_key=self.remote_arbiter_judge_api_key or None,
+            judge_arbitration_min_delta=self.judge_arbitration_min_delta,
+            remote_judge_timeout_seconds=self.remote_judge_timeout_seconds,
+            remote_judge_temperature=self.remote_judge_temperature,
+            remote_judge_max_tokens=self.remote_judge_max_tokens,
+            remote_judge_top_p=self.remote_judge_top_p,
+            remote_judge_openai_compatible=self.remote_judge_openai_compatible,
+            judge_save_raw_response=self.judge_save_raw_response,
             dry_run=dry_run,
             no_audit_animation=True,
         )
@@ -219,13 +245,14 @@ _INDEX_HTML = """
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Atividade 2 Judge Console</title>
   <style>
-    :root { color-scheme: light; --ink:#18212f; --muted:#5b6472; --line:#d8dde6; --bg:#f6f7f9; --accent:#1769aa; --ok:#1d7f4e; --bad:#b42318; }
+    :root { color-scheme: light; --ink:#18212f; --muted:#5b6472; --line:#d8dde6; --bg:#f6f7f9; --accent:#1769aa; --ok:#1d7f4e; --bad:#b42318; --warn:#9a5b00; }
     * { box-sizing: border-box; }
     body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--ink); background:var(--bg); }
     header { padding:20px 28px 12px; border-bottom:1px solid var(--line); background:#fff; }
     h1 { margin:0 0 6px; font-size:22px; letter-spacing:0; }
     main { max-width:1180px; margin:0 auto; padding:20px; display:grid; grid-template-columns: 380px 1fr; gap:18px; }
     section, aside { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; }
+    aside { padding-bottom:82px; }
     h2 { font-size:15px; margin:0 0 12px; }
     label { display:grid; gap:5px; margin:10px 0; color:var(--muted); font-size:12px; }
     input, select { width:100%; min-height:36px; border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; color:var(--ink); background:#fff; }
@@ -233,7 +260,21 @@ _INDEX_HTML = """
     button.secondary { color:var(--accent); background:#fff; }
     button:disabled { opacity:.55; cursor:not-allowed; }
     .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-    .actions { display:flex; gap:10px; margin-top:14px; }
+    .judge-block { border-top:1px solid var(--line); padding-top:10px; margin-top:10px; }
+    .endpoint-fields[hidden] { display:none; }
+    .secret-row { display:grid; grid-template-columns:1fr 38px; gap:8px; align-items:center; }
+    .icon-button { min-height:36px; padding:0; border-color:var(--line); background:#fff; color:var(--ink); font-size:16px; font-weight:500; }
+    .inline { display:flex; align-items:center; gap:8px; margin:8px 0; color:var(--muted); font-size:12px; }
+    .inline input { width:auto; min-height:auto; }
+    .hint { color:var(--muted); font-size:12px; line-height:1.35; margin:-4px 0 8px; }
+    .warn { color:var(--warn); }
+    details { border-top:1px solid var(--line); margin-top:12px; padding-top:10px; }
+    summary { cursor:pointer; color:var(--ink); font-size:13px; font-weight:650; }
+    .status-icon { display:inline-grid; place-items:center; width:18px; height:18px; margin-right:6px; vertical-align:-3px; }
+    .spinner { border:2px solid #c9d2de; border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .actions { position:sticky; bottom:0; display:flex; gap:10px; margin:14px -16px -16px; padding:12px 16px; border-top:1px solid var(--line); background:#fff; border-radius:0 0 8px 8px; }
+    .actions button { flex:1; }
     .presets { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px; }
     .presets button { min-height:32px; font-size:12px; }
     .status { font-size:13px; color:var(--muted); }
@@ -271,18 +312,93 @@ _INDEX_HTML = """
       <label>Estrategia
         <select id="judge_execution_strategy"><option>sequential</option><option>parallel</option></select>
       </label>
-      <label>Juiz 1
+      <div class="hint">Sequential e melhor para endpoint local ou fragil. Parallel e indicado para endpoint remoto que aceita concorrencia.</div>
+      <div class="judge-block">
+      <label>Juiz 1 - modelo
         <input id="judge_model" autocomplete="off">
       </label>
-      <label>Juiz 2
+      <label>Endpoint do juiz 1
+        <select id="endpoint_source_judge"><option value="env">Usar .env</option><option value="custom">Config propria</option></select>
+      </label>
+      <div id="endpoint_fields_judge" class="endpoint-fields" hidden>
+      <label>Juiz 1 - URL
+        <input id="remote_judge_base_url" autocomplete="off" placeholder="usa REMOTE_JUDGE_BASE_URL se vazio">
+      </label>
+      <label>Juiz 1 - token/key
+        <span class="secret-row">
+          <input id="remote_judge_api_key" type="password" autocomplete="off" placeholder="usa REMOTE_JUDGE_API_KEY se vazio">
+          <button class="icon-button" type="button" data-toggle-secret="remote_judge_api_key" aria-label="Exibir token/key do juiz 1" aria-pressed="false">◉</button>
+        </span>
+      </label>
+      </div>
+      </div>
+      <div class="judge-block">
+      <label>Juiz 2 - modelo
         <input id="secondary_judge_model" autocomplete="off">
       </label>
-      <label>Arbitro
+      <label>Endpoint do juiz 2
+        <select id="endpoint_source_secondary"><option value="env">Usar .env</option><option value="judge">Copiar do juiz 1</option><option value="custom">Config propria</option></select>
+      </label>
+      <div id="endpoint_fields_secondary" class="endpoint-fields" hidden>
+      <label>Juiz 2 - URL
+        <input id="remote_secondary_judge_base_url" autocomplete="off" placeholder="usa endpoint global se vazio">
+      </label>
+      <label>Juiz 2 - token/key
+        <span class="secret-row">
+          <input id="remote_secondary_judge_api_key" type="password" autocomplete="off" placeholder="usa token global se vazio">
+          <button class="icon-button" type="button" data-toggle-secret="remote_secondary_judge_api_key" aria-label="Exibir token/key do juiz 2" aria-pressed="false">◉</button>
+        </span>
+      </label>
+      </div>
+      </div>
+      <div class="judge-block">
+      <label>Arbitro - modelo
         <input id="arbiter_judge_model" autocomplete="off">
       </label>
-      <label>
-        <span><input id="always_run_arbiter" type="checkbox" style="width:auto; min-height:auto"> Always run arbiter</span>
+      <label>Endpoint do arbitro
+        <select id="endpoint_source_arbiter"><option value="env">Usar .env</option><option value="judge">Copiar do juiz 1</option><option value="secondary">Copiar do juiz 2</option><option value="custom">Config propria</option></select>
       </label>
+      <div id="endpoint_fields_arbiter" class="endpoint-fields" hidden>
+      <label>Arbitro - URL
+        <input id="remote_arbiter_judge_base_url" autocomplete="off" placeholder="usa endpoint global se vazio">
+      </label>
+      <label>Arbitro - token/key
+        <span class="secret-row">
+          <input id="remote_arbiter_judge_api_key" type="password" autocomplete="off" placeholder="usa token global se vazio">
+          <button class="icon-button" type="button" data-toggle-secret="remote_arbiter_judge_api_key" aria-label="Exibir token/key do arbitro" aria-pressed="false">◉</button>
+        </span>
+      </label>
+      </div>
+      </div>
+      <label class="inline"><input id="judge_save_raw_response" type="checkbox"> Salvar resposta bruta do juiz</label>
+      <details>
+        <summary>Campos avancados</summary>
+        <label class="inline"><input id="always_run_arbiter" type="checkbox"> Rodar arbitro sempre <span class="warn">aumenta custo e chamadas remotas</span></label>
+        <div class="row">
+          <label>Timeout (s)
+            <input id="remote_judge_timeout_seconds" type="number" min="1">
+          </label>
+          <label>Arbitration min delta
+            <input id="judge_arbitration_min_delta" type="number" min="0">
+          </label>
+        </div>
+        <div class="row">
+          <label>Temperature
+            <input id="remote_judge_temperature" type="number" min="0" step="0.1">
+          </label>
+          <label>Max tokens
+            <input id="remote_judge_max_tokens" type="number" min="1">
+          </label>
+        </div>
+        <div class="row">
+          <label>Top P
+            <input id="remote_judge_top_p" type="number" min="0" step="0.1">
+          </label>
+          <label>OpenAI compatible
+            <select id="remote_judge_openai_compatible"><option value="true">true</option><option value="false">false</option></select>
+          </label>
+        </div>
+      </details>
       <div class="actions">
         <button class="secondary" id="dry-run">Validar configuracao</button>
         <button id="run">Executar</button>
@@ -294,7 +410,7 @@ _INDEX_HTML = """
       <div id="progress-label" class="status">0% - aguardando execucao</div>
       <table>
         <tbody>
-          <tr><th>Status</th><td id="run-status">idle</td></tr>
+          <tr><th>Status</th><td><span id="run-status-icon" class="status-icon">-</span><span id="run-status">idle</span></td></tr>
           <tr><th>Audit log</th><td id="audit-log" class="muted">-</td></tr>
           <tr><th>Selecionadas</th><td id="selected">-</td></tr>
           <tr><th>Executadas</th><td id="executed">-</td></tr>
@@ -316,6 +432,7 @@ _INDEX_HTML = """
     function setText(id, text) { document.getElementById(id).textContent = text ?? "-"; }
 
     function payload() {
+      applyEndpointSources();
       return {
         panel_mode: value("panel_mode"),
         dataset: value("dataset"),
@@ -324,8 +441,26 @@ _INDEX_HTML = """
         judge_model: value("judge_model"),
         secondary_judge_model: value("secondary_judge_model"),
         arbiter_judge_model: value("arbiter_judge_model"),
-        always_run_arbiter: document.getElementById("always_run_arbiter").checked
+        always_run_arbiter: document.getElementById("always_run_arbiter").checked,
+        remote_judge_base_url: value("remote_judge_base_url"),
+        remote_judge_api_key: value("remote_judge_api_key"),
+        remote_secondary_judge_base_url: value("remote_secondary_judge_base_url"),
+        remote_secondary_judge_api_key: value("remote_secondary_judge_api_key"),
+        remote_arbiter_judge_base_url: value("remote_arbiter_judge_base_url"),
+        remote_arbiter_judge_api_key: value("remote_arbiter_judge_api_key"),
+        judge_arbitration_min_delta: optionalNumber("judge_arbitration_min_delta"),
+        remote_judge_timeout_seconds: optionalNumber("remote_judge_timeout_seconds"),
+        remote_judge_temperature: optionalNumber("remote_judge_temperature"),
+        remote_judge_max_tokens: optionalNumber("remote_judge_max_tokens"),
+        remote_judge_top_p: optionalNumber("remote_judge_top_p"),
+        remote_judge_openai_compatible: value("remote_judge_openai_compatible") === "true",
+        judge_save_raw_response: document.getElementById("judge_save_raw_response").checked
       };
+    }
+
+    function optionalNumber(id) {
+      const raw = value(id);
+      return raw === "" ? null : Number(raw);
     }
 
     async function postJson(url, body) {
@@ -346,7 +481,9 @@ _INDEX_HTML = """
     }
 
     function renderRun(data) {
-      setText("run-status", data.status || "dry-run");
+      const status = data.status || "dry-run";
+      setText("run-status", status);
+      renderStatusIcon(status);
       setText("audit-log", data.audit_log || data.result?.audit_log || "-");
       setText("command-preview", data.command_preview || data.result?.command_preview || "");
       renderProgress(data.progress);
@@ -357,6 +494,23 @@ _INDEX_HTML = """
       setText("arbiters", summary?.arbiter_evaluations ?? data.progress?.arbiter_evaluations);
       if (data.error) setText("output", data.error);
       else if (data.result) setText("output", data.result.execution_summary);
+    }
+
+    function renderStatusIcon(status) {
+      const icon = document.getElementById("run-status-icon");
+      icon.className = "status-icon";
+      if (["queued", "running"].includes(status)) {
+        icon.textContent = "";
+        icon.classList.add("spinner");
+      } else if (status === "completed" || status === "dry-run") {
+        icon.textContent = "✓";
+        icon.classList.add("ok");
+      } else if (status === "failed") {
+        icon.textContent = "!";
+        icon.classList.add("bad");
+      } else {
+        icon.textContent = "-";
+      }
     }
 
     async function poll(runId) {
@@ -372,10 +526,12 @@ _INDEX_HTML = """
       const config = await (await fetch("/api/config")).json();
       csrfToken = config.csrf_token;
       const defaults = config.defaults || {};
-      for (const key of ["panel_mode", "dataset", "batch_size", "judge_execution_strategy", "judge_model", "secondary_judge_model", "arbiter_judge_model"]) {
+      for (const key of ["panel_mode", "dataset", "batch_size", "judge_execution_strategy", "judge_model", "secondary_judge_model", "arbiter_judge_model", "judge_arbitration_min_delta", "remote_judge_timeout_seconds", "remote_judge_temperature", "remote_judge_max_tokens", "remote_judge_top_p"]) {
         if (defaults[key] !== null && defaults[key] !== undefined) document.getElementById(key).value = defaults[key];
       }
       document.getElementById("always_run_arbiter").checked = Boolean(defaults.always_run_arbiter);
+      document.getElementById("judge_save_raw_response").checked = Boolean(defaults.judge_save_raw_response);
+      document.getElementById("remote_judge_openai_compatible").value = String(Boolean(defaults.remote_judge_openai_compatible));
       setText("config-status", config.configuration_error || `Endpoints: juiz 1 ${config.endpoints?.JUDGE?.host || "-"} / juiz 2 ${config.endpoints?.SECONDARY_JUDGE?.host || "-"}`);
       setText("command-preview", config.command_preview || "");
       const presetRoot = document.getElementById("presets");
@@ -392,6 +548,54 @@ _INDEX_HTML = """
         };
         presetRoot.appendChild(btn);
       }
+      renderEndpointFields();
+    }
+
+    function copyEndpointValues(source, target) {
+      const sourcePrefix = source === "secondary" ? "remote_secondary_judge" : "remote_judge";
+      const targetPrefix = target === "arbiter" ? "remote_arbiter_judge" : "remote_secondary_judge";
+      document.getElementById(`${targetPrefix}_base_url`).value = document.getElementById(`${sourcePrefix}_base_url`).value;
+      document.getElementById(`${targetPrefix}_api_key`).value = document.getElementById(`${sourcePrefix}_api_key`).value;
+    }
+
+    function clearEndpoint(target) {
+      const prefix = target === "judge" ? "remote_judge" : `remote_${target}_judge`;
+      document.getElementById(`${prefix}_base_url`).value = "";
+      document.getElementById(`${prefix}_api_key`).value = "";
+    }
+
+    function renderEndpointFields() {
+      for (const name of ["judge", "secondary", "arbiter"]) {
+        document.getElementById(`endpoint_fields_${name}`).hidden = value(`endpoint_source_${name}`) !== "custom";
+      }
+    }
+
+    function applyEndpointSources() {
+      const secondarySource = value("endpoint_source_secondary");
+      const arbiterSource = value("endpoint_source_arbiter");
+      if (value("endpoint_source_judge") === "env") clearEndpoint("judge");
+      if (secondarySource === "env") clearEndpoint("secondary");
+      else if (secondarySource === "judge") copyEndpointValues("judge", "secondary");
+      if (arbiterSource === "env") clearEndpoint("arbiter");
+      else if (arbiterSource === "judge") copyEndpointValues("judge", "arbiter");
+      else if (arbiterSource === "secondary") copyEndpointValues("secondary", "arbiter");
+    }
+
+    for (const id of ["endpoint_source_judge", "endpoint_source_secondary", "endpoint_source_arbiter"]) {
+      document.getElementById(id).onchange = () => {
+        applyEndpointSources();
+        renderEndpointFields();
+      };
+    }
+
+    for (const button of document.querySelectorAll("[data-toggle-secret]")) {
+      button.onclick = () => {
+        const input = document.getElementById(button.dataset.toggleSecret);
+        const showing = input.type === "text";
+        input.type = showing ? "password" : "text";
+        button.textContent = showing ? "◉" : "◎";
+        button.setAttribute("aria-pressed", String(!showing));
+      };
     }
 
     document.getElementById("dry-run").onclick = async () => {

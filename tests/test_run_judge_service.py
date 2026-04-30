@@ -56,3 +56,53 @@ def test_invalid_configuration_is_reported_in_config_description() -> None:
 
     assert "configuration_error" in config
     assert "REMOTE_JUDGE_BASE_URL is required" in config["configuration_error"]
+
+
+def test_resolve_applies_web_endpoint_and_advanced_overrides() -> None:
+    service = RunJudgeService(settings_loader=lambda: load_settings(dotenv_path=None, env=BASE_ENV))
+
+    resolved = service.resolve(
+        RunJudgeRequest(
+            panel_mode="2plus1",
+            remote_judge_base_url="https://judge1.example.invalid/v1",
+            remote_judge_api_key="key-1",
+            remote_secondary_judge_base_url="https://judge2.example.invalid/v1",
+            remote_secondary_judge_api_key="key-2",
+            remote_arbiter_judge_base_url="https://arbiter.example.invalid/v1",
+            remote_arbiter_judge_api_key="key-3",
+            judge_arbitration_min_delta=1,
+            remote_judge_timeout_seconds=240,
+            remote_judge_temperature=0.0,
+            remote_judge_max_tokens=4000,
+            remote_judge_top_p=1.0,
+            remote_judge_openai_compatible=True,
+            judge_save_raw_response=False,
+        )
+    )
+
+    settings = resolved.runtime_config.settings
+    assert settings.remote_judge_base_url == "https://judge1.example.invalid/v1"
+    assert settings.remote_judge_api_key == "key-1"
+    assert settings.remote_judge_endpoints["SECONDARY_JUDGE"].base_url == "https://judge2.example.invalid/v1"
+    assert settings.remote_judge_endpoints["ARBITER"].api_key == "key-3"
+    assert resolved.runtime_config.arbitration_min_delta == 1
+    assert settings.remote_judge_timeout_seconds == 240
+    assert settings.remote_judge_max_tokens == 4000
+    assert settings.judge_save_raw_response is False
+    assert "key-" not in resolved.command_preview
+
+
+def test_endpoint_override_requires_url_and_key_together() -> None:
+    service = RunJudgeService(settings_loader=lambda: load_settings(dotenv_path=None, env=BASE_ENV))
+
+    try:
+        service.resolve(
+            RunJudgeRequest(
+                panel_mode="single",
+                remote_secondary_judge_base_url="https://judge2.example.invalid/v1",
+            )
+        )
+    except ValueError as error:
+        assert "Both URL and token/key are required" in str(error)
+    else:
+        raise AssertionError("incomplete endpoint override should fail")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import shlex
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -41,6 +41,19 @@ class RunJudgeRequest:
     judge_execution_strategy: str | None = None
     dataset: str = "J2"
     batch_size: int | None = None
+    remote_judge_base_url: str | None = None
+    remote_judge_api_key: str | None = None
+    remote_secondary_judge_base_url: str | None = None
+    remote_secondary_judge_api_key: str | None = None
+    remote_arbiter_judge_base_url: str | None = None
+    remote_arbiter_judge_api_key: str | None = None
+    judge_arbitration_min_delta: int | None = None
+    remote_judge_timeout_seconds: int | None = None
+    remote_judge_temperature: float | None = None
+    remote_judge_max_tokens: int | None = None
+    remote_judge_top_p: float | None = None
+    remote_judge_openai_compatible: bool | None = None
+    judge_save_raw_response: bool | None = None
     dry_run: bool = False
     audit_log: str | None = None
     no_audit_animation: bool = False
@@ -98,6 +111,13 @@ class RunJudgeService:
                 "secondary_judge_model": settings.remote_secondary_judge_model,
                 "arbiter_judge_model": settings.remote_arbiter_judge_model,
                 "always_run_arbiter": settings.judge_always_run_arbiter,
+                "judge_arbitration_min_delta": settings.judge_arbitration_min_delta,
+                "remote_judge_timeout_seconds": settings.remote_judge_timeout_seconds,
+                "remote_judge_temperature": settings.remote_judge_temperature,
+                "remote_judge_max_tokens": settings.remote_judge_max_tokens,
+                "remote_judge_top_p": settings.remote_judge_top_p,
+                "remote_judge_openai_compatible": settings.remote_judge_openai_compatible,
+                "judge_save_raw_response": settings.judge_save_raw_response,
             },
             "supported": {
                 "panel_modes": ["single", "primary_only", "2plus1"],
@@ -124,7 +144,7 @@ class RunJudgeService:
 
     def resolve(self, request: RunJudgeRequest) -> ResolvedRun:
         """Resolve settings and CLI/Web overrides without touching DB or remote HTTP."""
-        settings = self._settings_loader()
+        settings = _apply_request_overrides(self._settings_loader(), request)
         runtime_config = resolve_runtime_config(
             settings,
             judge_provider=request.judge_provider,
@@ -157,7 +177,7 @@ class RunJudgeService:
         animate = False if request.no_audit_animation else None
         with AuditLogger(file_path=audit_path, animate=animate) as audit:
             with audit.step("Loading configuration"):
-                settings = self._settings_loader()
+                settings = _apply_request_overrides(self._settings_loader(), request)
             with audit.step(
                 "Resolving judge mode and models",
                 detail=(
@@ -335,6 +355,87 @@ def _required_evaluations(config: RuntimeJudgeConfig) -> tuple[tuple[ModelSpec, 
         (model, role, config.panel_mode)
         for model, role in zip(config.primary_panel, ("principal", "controle"), strict=False)
     )
+
+
+def _apply_request_overrides(settings: JudgeSettings, request: RunJudgeRequest) -> JudgeSettings:
+    """Apply Web-only per-run settings while preserving .env fallbacks."""
+    primary_base_url = settings.remote_judge_base_url
+    primary_api_key = settings.remote_judge_api_key
+    if request.remote_judge_base_url or request.remote_judge_api_key:
+        primary_endpoint = _complete_endpoint_override(
+            base_url=request.remote_judge_base_url,
+            api_key=request.remote_judge_api_key,
+            label="primary judge",
+        )
+        primary_base_url = primary_endpoint.base_url
+        primary_api_key = primary_endpoint.api_key
+
+    endpoint_overrides = dict(settings.remote_judge_endpoints)
+    if request.remote_secondary_judge_base_url or request.remote_secondary_judge_api_key:
+        endpoint_overrides["SECONDARY_JUDGE"] = _complete_endpoint_override(
+            base_url=request.remote_secondary_judge_base_url,
+            api_key=request.remote_secondary_judge_api_key,
+            label="secondary judge",
+        )
+    if request.remote_arbiter_judge_base_url or request.remote_arbiter_judge_api_key:
+        endpoint_overrides["ARBITER"] = _complete_endpoint_override(
+            base_url=request.remote_arbiter_judge_base_url,
+            api_key=request.remote_arbiter_judge_api_key,
+            label="arbiter judge",
+        )
+
+    return replace(
+        settings,
+        remote_judge_base_url=primary_base_url,
+        remote_judge_api_key=primary_api_key,
+        remote_judge_endpoints=endpoint_overrides,
+        judge_arbitration_min_delta=(
+            request.judge_arbitration_min_delta
+            if request.judge_arbitration_min_delta is not None
+            else settings.judge_arbitration_min_delta
+        ),
+        remote_judge_timeout_seconds=(
+            request.remote_judge_timeout_seconds
+            if request.remote_judge_timeout_seconds is not None
+            else settings.remote_judge_timeout_seconds
+        ),
+        remote_judge_temperature=(
+            request.remote_judge_temperature
+            if request.remote_judge_temperature is not None
+            else settings.remote_judge_temperature
+        ),
+        remote_judge_max_tokens=(
+            request.remote_judge_max_tokens
+            if request.remote_judge_max_tokens is not None
+            else settings.remote_judge_max_tokens
+        ),
+        remote_judge_top_p=(
+            request.remote_judge_top_p if request.remote_judge_top_p is not None else settings.remote_judge_top_p
+        ),
+        remote_judge_openai_compatible=(
+            request.remote_judge_openai_compatible
+            if request.remote_judge_openai_compatible is not None
+            else settings.remote_judge_openai_compatible
+        ),
+        judge_save_raw_response=(
+            request.judge_save_raw_response
+            if request.judge_save_raw_response is not None
+            else settings.judge_save_raw_response
+        ),
+    )
+
+
+def _complete_endpoint_override(
+    *,
+    base_url: str | None,
+    api_key: str | None,
+    label: str,
+) -> Any:
+    from .contracts import RemoteJudgeEndpoint
+
+    if not base_url or not api_key:
+        raise ConfigurationError(f"Both URL and token/key are required for {label} endpoint overrides.")
+    return RemoteJudgeEndpoint(base_url=base_url, api_key=api_key)
 
 
 def _format_model_with_endpoint(config: RuntimeJudgeConfig, model: ModelSpec, endpoint_key: str) -> str:

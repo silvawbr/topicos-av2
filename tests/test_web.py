@@ -26,6 +26,13 @@ class FakeRunJudgeService:
                 "secondary_judge_model": "llama-3.3-70b-instruct",
                 "arbiter_judge_model": "m-prometheus-14b",
                 "always_run_arbiter": False,
+                "judge_arbitration_min_delta": 2,
+                "remote_judge_timeout_seconds": 180,
+                "remote_judge_temperature": 0.0,
+                "remote_judge_max_tokens": 4000,
+                "remote_judge_top_p": 1.0,
+                "remote_judge_openai_compatible": True,
+                "judge_save_raw_response": True,
             },
             "endpoints": {"JUDGE": {"host": "example.invalid", "has_api_key": True}},
             "presets": [],
@@ -90,6 +97,31 @@ def test_web_index_contains_progress_element() -> None:
     assert "/api/runs/" in response.text
 
 
+def test_web_index_contains_endpoint_and_advanced_controls() -> None:
+    client = TestClient(create_app(FakeRunJudgeService()))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'id="remote_judge_base_url"' in response.text
+    assert 'id="remote_judge_api_key" type="password"' in response.text
+    assert 'data-toggle-secret="remote_judge_api_key"' in response.text
+    assert 'data-toggle-secret="remote_secondary_judge_api_key"' in response.text
+    assert 'data-toggle-secret="remote_arbiter_judge_api_key"' in response.text
+    assert 'id="endpoint_source_judge"' in response.text
+    assert 'id="endpoint_source_secondary"' in response.text
+    assert 'id="endpoint_source_arbiter"' in response.text
+    assert 'id="endpoint_fields_judge" class="endpoint-fields" hidden' in response.text
+    assert 'id="endpoint_fields_secondary" class="endpoint-fields" hidden' in response.text
+    assert 'id="endpoint_fields_arbiter" class="endpoint-fields" hidden' in response.text
+    assert 'id="remote_judge_timeout_seconds"' in response.text
+    assert 'id="remote_judge_openai_compatible"' in response.text
+    assert "<summary>Campos avancados</summary>" in response.text
+    assert 'id="always_run_arbiter"' in response.text
+    assert '<button id="run">Executar</button>' in response.text
+    assert 'id="run-status-icon"' in response.text
+
+
 def test_config_endpoint_is_secret_safe_and_returns_csrf_token() -> None:
     client = TestClient(create_app(FakeRunJudgeService()))
 
@@ -126,6 +158,44 @@ def test_dry_run_returns_secret_safe_preview() -> None:
     assert data["summary"] is None
     assert "Judge mode: single" in data["execution_summary"]
     assert "secret" not in response.text.lower()
+
+
+def test_dry_run_accepts_endpoint_and_advanced_overrides() -> None:
+    service = FakeRunJudgeService()
+    client = TestClient(create_app(service))
+    token = client.get("/api/config").json()["csrf_token"]
+
+    response = client.post(
+        "/api/runs/dry-run",
+        headers={"x-csrf-token": token},
+        json={
+            "panel_mode": "2plus1",
+            "dataset": "J2",
+            "batch_size": 3,
+            "remote_judge_base_url": "https://judge1.example.invalid/v1",
+            "remote_judge_api_key": "key-1",
+            "remote_secondary_judge_base_url": "https://judge2.example.invalid/v1",
+            "remote_secondary_judge_api_key": "key-2",
+            "remote_arbiter_judge_base_url": "https://arbiter.example.invalid/v1",
+            "remote_arbiter_judge_api_key": "key-3",
+            "judge_arbitration_min_delta": 1,
+            "remote_judge_timeout_seconds": 240,
+            "remote_judge_temperature": 0.0,
+            "remote_judge_max_tokens": 4000,
+            "remote_judge_top_p": 1.0,
+            "remote_judge_openai_compatible": True,
+            "judge_save_raw_response": False,
+        },
+    )
+
+    assert response.status_code == 200
+    request = service.requests[-1]
+    assert request.remote_judge_base_url == "https://judge1.example.invalid/v1"
+    assert request.remote_secondary_judge_api_key == "key-2"
+    assert request.remote_arbiter_judge_base_url == "https://arbiter.example.invalid/v1"
+    assert request.judge_arbitration_min_delta == 1
+    assert request.remote_judge_timeout_seconds == 240
+    assert request.judge_save_raw_response is False
 
 
 def test_run_lifecycle_exposes_batch_progress() -> None:
