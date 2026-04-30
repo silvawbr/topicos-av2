@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
-from .contracts import JudgeExecutionStrategy, JudgeSettings, PanelMode, RuntimeJudgeConfig
+from .contracts import (
+    JudgeExecutionStrategy,
+    JudgeSettings,
+    ModelSpec,
+    PanelMode,
+    RemoteJudgeEndpoint,
+    RuntimeJudgeConfig,
+)
 from .model_aliases import resolve_judge_model
 
 DEFAULT_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/app_dev"
@@ -41,11 +49,10 @@ def parse_env_file(path: str | Path) -> dict[str, str]:
 
 
 def load_env(dotenv_path: str | Path | None = ".env", env: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Load dotenv values, then overlay process environment values."""
-    values: dict[str, str] = {}
+    """Load environment values, then overlay dotenv values."""
+    values: dict[str, str] = dict(os.environ if env is None else env)
     if dotenv_path is not None:
         values.update(parse_env_file(dotenv_path))
-    values.update(dict(os.environ if env is None else env))
     return values
 
 
@@ -66,9 +73,10 @@ def load_settings(dotenv_path: str | Path | None = ".env", env: Mapping[str, str
         judge_provider=provider,  # type: ignore[arg-type]
         remote_judge_base_url=_empty_to_none(values.get("REMOTE_JUDGE_BASE_URL")),
         remote_judge_api_key=_empty_to_none(values.get("REMOTE_JUDGE_API_KEY")),
+        remote_judge_endpoints=_parse_remote_judge_endpoints(values),
         judge_panel_mode=panel_mode,  # type: ignore[arg-type]
         remote_judge_default_model=_empty_to_none(values.get("REMOTE_JUDGE_MODEL")),
-        remote_primary_judge_panel=_parse_panel(values.get("REMOTE_PRIMARY_JUDGE_PANEL", "")),
+        remote_secondary_judge_model=_empty_to_none(values.get("REMOTE_SECONDARY_JUDGE_MODEL")),
         remote_arbiter_judge_model=_empty_to_none(values.get("REMOTE_ARBITER_JUDGE_MODEL")),
         judge_arbitration_min_delta=_parse_int(values, "JUDGE_ARBITRATION_MIN_DELTA", 2, minimum=0),
         judge_always_run_arbiter=_parse_bool(values, "JUDGE_ALWAYS_RUN_ARBITER", False),
@@ -88,7 +96,7 @@ def resolve_runtime_config(
     judge_provider: str | None = None,
     panel_mode: str | None = None,
     judge_model: str | None = None,
-    primary_judge_panel: str | None = None,
+    secondary_judge_model: str | None = None,
     arbiter_judge_model: str | None = None,
     always_run_arbiter: bool = False,
     execution_strategy: str | None = None,
@@ -122,10 +130,14 @@ def resolve_runtime_config(
             model_source="CLI argument --judge-model" if judge_model else ".env REMOTE_JUDGE_MODEL",
         )
 
-    panel_values = _parse_panel(primary_judge_panel) if primary_judge_panel else settings.remote_primary_judge_panel
+    panel_values = _resolve_primary_panel_values(
+        settings,
+        judge_model=judge_model,
+        secondary_judge_model=secondary_judge_model,
+    )
     if not panel_values:
         raise ConfigurationError(
-            f"{effective_mode} mode requires --primary-judge-panel or REMOTE_PRIMARY_JUDGE_PANEL."
+            f"{effective_mode} mode requires REMOTE_JUDGE_MODEL and REMOTE_SECONDARY_JUDGE_MODEL."
         )
     if effective_mode == "2plus1" and len(panel_values) != 2:
         raise ConfigurationError("2plus1 mode requires exactly two primary judge models.")
@@ -150,7 +162,7 @@ def resolve_runtime_config(
         always_run_arbiter=always_run_arbiter or settings.judge_always_run_arbiter,
         execution_strategy=effective_strategy,
         settings=settings,
-        model_source=_panel_model_source(primary_judge_panel, arbiter_judge_model),
+        model_source=_panel_model_source(judge_model, secondary_judge_model, arbiter_judge_model),
     )
 
 
@@ -162,8 +174,6 @@ def _resolve_panel_mode(settings: JudgeSettings, panel_mode: str | None, judge_m
         raise ConfigurationError(
             f"Unsupported panel mode: {effective_mode}. Supported values: single, primary_only, 2plus1."
         )
-    if judge_model and effective_mode != "single":
-        raise ConfigurationError("--judge-model is only valid in single mode.")
     return effective_mode  # type: ignore[return-value]
 
 
@@ -189,13 +199,38 @@ def _validate_remote_settings(settings: JudgeSettings) -> None:
         raise ConfigurationError("REMOTE_JUDGE_BASE_URL must start with http:// or https://.")
     if not settings.remote_judge_api_key:
         raise ConfigurationError("REMOTE_JUDGE_API_KEY is required for JUDGE_PROVIDER=remote_http.")
+    for key, endpoint in settings.remote_judge_endpoints.items():
+        if not endpoint.base_url.startswith(("http://", "https://")):
+            raise ConfigurationError(f"REMOTE_JUDGE_{key}_BASE_URL must start with http:// or https://.")
 
 
-def _panel_model_source(primary_judge_panel: str | None, arbiter_judge_model: str | None) -> str:
+def _panel_model_source(
+    judge_model: str | None,
+    secondary_judge_model: str | None,
+    arbiter_judge_model: str | None,
+) -> str:
     sources: list[str] = []
-    sources.append("CLI --primary-judge-panel" if primary_judge_panel else ".env REMOTE_PRIMARY_JUDGE_PANEL")
+    sources.append("CLI --judge-model" if judge_model else ".env REMOTE_JUDGE_MODEL")
+    sources.append(
+        "CLI --secondary-judge-model"
+        if secondary_judge_model
+        else ".env REMOTE_SECONDARY_JUDGE_MODEL"
+    )
     sources.append("CLI --arbiter-judge-model" if arbiter_judge_model else ".env REMOTE_ARBITER_JUDGE_MODEL")
     return " / ".join(sources)
+
+
+def _resolve_primary_panel_values(
+    settings: JudgeSettings,
+    *,
+    judge_model: str | None,
+    secondary_judge_model: str | None,
+) -> tuple[str, ...]:
+    first = judge_model or settings.remote_judge_default_model
+    second = secondary_judge_model or settings.remote_secondary_judge_model
+    if first and second:
+        return (first, second)
+    return ()
 
 
 def _parse_panel(value: str | None) -> tuple[str, ...]:
@@ -205,6 +240,51 @@ def _parse_panel(value: str | None) -> tuple[str, ...]:
     if len(set(panel)) != len(panel):
         raise ConfigurationError("Judge panel cannot contain duplicate models.")
     return panel
+
+
+def _parse_remote_judge_endpoints(values: Mapping[str, str]) -> dict[str, RemoteJudgeEndpoint]:
+    prefix = "REMOTE_JUDGE_"
+    base_suffix = "_BASE_URL"
+    key_suffix = "_API_KEY"
+    endpoint_keys: set[str] = set()
+
+    endpoints: dict[str, RemoteJudgeEndpoint] = {}
+    for endpoint_key, base_env_key, api_key_env_key in (
+        ("SECONDARY_JUDGE", "REMOTE_SECONDARY_JUDGE_BASE_URL", "REMOTE_SECONDARY_JUDGE_API_KEY"),
+        ("ARBITER", "REMOTE_ARBITER_JUDGE_BASE_URL", "REMOTE_ARBITER_JUDGE_API_KEY"),
+    ):
+        base_url = _empty_to_none(values.get(base_env_key))
+        api_key = _empty_to_none(values.get(api_key_env_key))
+        if bool(base_url) != bool(api_key):
+            raise ConfigurationError(f"{base_env_key} and {api_key_env_key} must be configured together.")
+        if base_url and api_key:
+            endpoints[endpoint_key] = RemoteJudgeEndpoint(base_url=base_url, api_key=api_key)
+
+    for env_key in values:
+        if not env_key.startswith(prefix):
+            continue
+        if env_key in {"REMOTE_JUDGE_BASE_URL", "REMOTE_JUDGE_API_KEY"}:
+            continue
+        if env_key.endswith(base_suffix):
+            endpoint_keys.add(_remote_endpoint_key(env_key.removeprefix(prefix).removesuffix(base_suffix)))
+        elif env_key.endswith(key_suffix):
+            endpoint_keys.add(_remote_endpoint_key(env_key.removeprefix(prefix).removesuffix(key_suffix)))
+
+    for endpoint_key in sorted(endpoint_keys):
+        base_url = _empty_to_none(values.get(f"{prefix}{endpoint_key}{base_suffix}"))
+        api_key = _empty_to_none(values.get(f"{prefix}{endpoint_key}{key_suffix}"))
+        if bool(base_url) != bool(api_key):
+            raise ConfigurationError(
+                f"REMOTE_JUDGE_{endpoint_key}_BASE_URL and REMOTE_JUDGE_{endpoint_key}_API_KEY "
+                "must be configured together."
+            )
+        if base_url and api_key:
+            endpoints[endpoint_key] = RemoteJudgeEndpoint(base_url=base_url, api_key=api_key)
+    return endpoints
+
+
+def _remote_endpoint_key(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]+", "_", value.upper()).strip("_")
 
 
 def _parse_bool(values: Mapping[str, str], key: str, default: bool) -> bool:

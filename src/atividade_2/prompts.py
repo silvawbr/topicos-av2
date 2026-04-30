@@ -57,7 +57,12 @@ Metadados da pergunta:
 {metadata}
 ```
 
-Retorne somente JSON válido neste formato:
+Retorne somente um objeto JSON bruto.
+Não use markdown.
+Não use bloco ```json.
+Não escreva texto antes ou depois do JSON.
+
+Formato obrigatório:
 {{
   "score": 4,
   "rationale": "Justificativa curta e auditável.",

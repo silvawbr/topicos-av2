@@ -20,5 +20,6 @@ def test_prompt_contains_required_legal_context() -> None:
     assert "Qual alternativa correta?" in prompt
     assert "A, porque a regra aplicável exige isso." in prompt
     assert "Resposta de referência" in prompt
-    assert "Retorne somente JSON válido" in prompt
+    assert "Retorne somente um objeto JSON bruto" in prompt
+    assert "Não use markdown" in prompt
     assert "não recompense verbosidade" in prompt

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -71,21 +72,33 @@ class RemoteHttpJudgeClient:
     settings: JudgeSettings
     transport: HttpTransport | None = None
 
-    def judge(self, prompt: str, model: str) -> JudgeRawResponse:
-        if not self.settings.remote_judge_base_url:
+    def judge(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        requested_model: str | None = None,
+        endpoint_key: str | None = None,
+    ) -> JudgeRawResponse:
+        endpoint = self._resolve_endpoint(
+            model=model,
+            requested_model=requested_model,
+            endpoint_key=endpoint_key,
+        )
+        if not endpoint.base_url:
             raise RemoteJudgeError("REMOTE_JUDGE_BASE_URL is required.")
-        if not self.settings.remote_judge_api_key:
+        if not endpoint.api_key:
             raise RemoteJudgeError("REMOTE_JUDGE_API_KEY is required.")
 
         transport = self.transport or UrllibHttpTransport()
         url = _resolve_url(
-            self.settings.remote_judge_base_url,
+            endpoint.base_url,
             openai_compatible=self.settings.remote_judge_openai_compatible,
         )
         payload = self._build_payload(prompt=prompt, model=model)
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.settings.remote_judge_api_key}",
+            "Authorization": f"Bearer {endpoint.api_key}",
             "User-Agent": "atividade-2-judge/0.1",
         }
 
@@ -133,6 +146,41 @@ class RemoteHttpJudgeClient:
             "top_p": self.settings.remote_judge_top_p,
         }
 
+    def _resolve_endpoint(
+        self,
+        *,
+        model: str,
+        requested_model: str | None,
+        endpoint_key: str | None,
+    ) -> "_RemoteEndpoint":
+        if endpoint_key:
+            normalized_endpoint_key = _endpoint_key(endpoint_key)
+            if normalized_endpoint_key == "JUDGE":
+                return _RemoteEndpoint(
+                    base_url=self.settings.remote_judge_base_url,
+                    api_key=self.settings.remote_judge_api_key,
+                )
+            endpoint = self.settings.remote_judge_endpoints.get(normalized_endpoint_key)
+            if endpoint is not None:
+                return _RemoteEndpoint(base_url=endpoint.base_url, api_key=endpoint.api_key)
+        for candidate in (requested_model, model):
+            if not candidate:
+                continue
+            for endpoint_key in _endpoint_keys(candidate):
+                endpoint = self.settings.remote_judge_endpoints.get(endpoint_key)
+                if endpoint is not None:
+                    return _RemoteEndpoint(base_url=endpoint.base_url, api_key=endpoint.api_key)
+        return _RemoteEndpoint(
+            base_url=self.settings.remote_judge_base_url,
+            api_key=self.settings.remote_judge_api_key,
+        )
+
+
+@dataclass(frozen=True)
+class _RemoteEndpoint:
+    base_url: str | None
+    api_key: str | None
+
 
 def _resolve_url(base_url: str, *, openai_compatible: bool) -> str:
     stripped = base_url.rstrip("/")
@@ -141,6 +189,17 @@ def _resolve_url(base_url: str, *, openai_compatible: bool) -> str:
     if stripped.endswith("/chat/completions"):
         return stripped
     return f"{stripped}/chat/completions"
+
+
+def _endpoint_keys(model: str) -> tuple[str, ...]:
+    keys = [_endpoint_key(model)]
+    if "/" in model:
+        keys.append(_endpoint_key(model.rsplit("/", 1)[-1]))
+    return tuple(dict.fromkeys(key for key in keys if key))
+
+
+def _endpoint_key(model: str) -> str:
+    return re.sub(r"[^A-Z0-9]+", "_", model.upper()).strip("_")
 
 
 def _extract_response_text(raw_response: dict[str, Any]) -> str:
