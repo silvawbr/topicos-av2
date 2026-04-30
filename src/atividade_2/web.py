@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import csv
+import re
 import secrets
+import shlex
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from io import StringIO
 from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 from .config import ConfigurationError
@@ -21,6 +26,10 @@ from .run_judge_service import RunJudgeRequest, RunJudgeResult, RunJudgeService
 
 
 RunStatus = Literal["queued", "running", "completed", "failed"]
+RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+AUDIT_TIMESTAMP_PATTERN = re.compile(r"^([^|]+)\s+\|\s+([^|]+)(?:\s+\|\s+(.*))?$")
+AUDIT_KEY_VALUE_PATTERN = re.compile(r"([A-Za-z_]+)=([^ ]+)")
+DEFAULT_AUDIT_DIR = Path("outputs") / "audit"
 
 
 class RunPayload(BaseModel):
@@ -86,6 +95,23 @@ class JobState:
     command_preview: str | None = None
     eligibility: EligibilitySummary | None = None
     evaluation_events: list[EvaluationProgress] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RunHistoryEntry:
+    run_id: str
+    timestamp: str | None
+    finished_at: str | None
+    mode: str | None
+    dataset: str | None
+    batch_size: int | None
+    successes: int
+    failures: int
+    duration_seconds: int | None
+    duration: str | None
+    log_path: str
+    log_url: str
+    summary: str | None
 
 
 class JobRegistry:
@@ -164,10 +190,11 @@ class JobRegistry:
                     self._active_run_id = None
 
 
-def create_app(service: RunJudgeService | None = None) -> FastAPI:
+def create_app(service: RunJudgeService | None = None, *, audit_dir: Path | str = DEFAULT_AUDIT_DIR) -> FastAPI:
     app = FastAPI(title="Atividade 2 Judge Console")
     app.state.csrf_token = secrets.token_urlsafe(32)
     app.state.jobs = JobRegistry(service or RunJudgeService())
+    app.state.audit_dir = Path(audit_dir)
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -218,6 +245,42 @@ def create_app(service: RunJudgeService | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Audit log file not found.")
         return audit_path.read_text(encoding="utf-8")
 
+    @app.get("/api/run-history")
+    def get_run_history(request: Request) -> list[dict]:
+        return _list_run_history(request.app.state.audit_dir)
+
+    @app.get("/api/run-history/export.json")
+    def export_run_history_json(request: Request) -> list[dict]:
+        return _list_run_history(request.app.state.audit_dir)
+
+    @app.get("/api/run-history/export.csv")
+    def export_run_history_csv(request: Request) -> Response:
+        rows = _list_run_history(request.app.state.audit_dir)
+        output = StringIO()
+        fieldnames = [
+            "run_id",
+            "timestamp",
+            "mode",
+            "dataset",
+            "batch_size",
+            "successes",
+            "failures",
+            "duration",
+            "log_path",
+        ]
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field) for field in fieldnames})
+        return Response(content=output.getvalue(), media_type="text/csv; charset=utf-8")
+
+    @app.get("/api/run-history/{run_id}/audit-log", response_class=PlainTextResponse)
+    def get_run_history_audit_log(run_id: str, request: Request) -> str:
+        audit_path = _resolve_history_log_path(request.app.state.audit_dir, run_id)
+        if not audit_path.exists() or not audit_path.is_file():
+            raise HTTPException(status_code=404, detail="Audit log file not found.")
+        return audit_path.read_text(encoding="utf-8")
+
     return app
 
 
@@ -258,6 +321,163 @@ def _serialize_summary(summary: PipelineSummary | None) -> dict | None:
     if summary is None:
         return None
     return asdict(summary)
+
+
+def _list_run_history(audit_dir: Path) -> list[dict]:
+    if not audit_dir.exists() or not audit_dir.is_dir():
+        return []
+    entries = [_parse_audit_log(path) for path in audit_dir.glob("*.log") if path.is_file()]
+    entries.sort(key=lambda entry: entry.timestamp or "", reverse=True)
+    return [asdict(entry) for entry in entries]
+
+
+def _parse_audit_log(path: Path) -> RunHistoryEntry:
+    first_timestamp: datetime | None = None
+    last_timestamp: datetime | None = None
+    mode: str | None = None
+    dataset: str | None = None
+    batch_size: int | None = None
+    successes = 0
+    failures = 0
+    summary: str | None = None
+    elapsed_ms_total = 0
+
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        parsed = _parse_audit_line(line)
+        if parsed is None:
+            continue
+        timestamp, message, detail = parsed
+        first_timestamp = first_timestamp or timestamp
+        last_timestamp = timestamp
+        elapsed_ms_total += _extract_elapsed_ms(detail)
+        if message == "execution_summary":
+            summary = detail
+            mode = _extract_summary_value(detail, "Judge mode")
+        elif message == "command_preview":
+            dataset = _extract_cli_arg(detail, "--dataset") or dataset
+            batch_size = _parse_int(_extract_cli_arg(detail, "--batch-size")) or batch_size
+        elif message.startswith("START Counting eligible answers for ") or message.startswith(
+            "START Selecting pending candidate answers for "
+        ):
+            values = _key_values(detail)
+            dataset = values.get("dataset") or dataset
+            batch_size = _parse_int(values.get("batch_size")) or batch_size
+        elif message == "execution_result":
+            values = _key_values(detail)
+            successes = _parse_int(values.get("executed")) or successes
+        if _is_failure_event(message, detail):
+            failures += 1
+
+    duration_seconds = _duration_seconds(first_timestamp, last_timestamp, elapsed_ms_total)
+    run_id = path.stem
+    return RunHistoryEntry(
+        run_id=run_id,
+        timestamp=first_timestamp.isoformat() if first_timestamp is not None else None,
+        finished_at=last_timestamp.isoformat() if last_timestamp is not None else None,
+        mode=mode,
+        dataset=dataset,
+        batch_size=batch_size,
+        successes=successes,
+        failures=failures,
+        duration_seconds=duration_seconds,
+        duration=_format_duration(duration_seconds),
+        log_path=str(path),
+        log_url=f"/api/run-history/{run_id}/audit-log",
+        summary=summary,
+    )
+
+
+def _parse_audit_line(line: str) -> tuple[datetime, str, str | None] | None:
+    match = AUDIT_TIMESTAMP_PATTERN.match(line)
+    if not match:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(match.group(1).strip())
+    except ValueError:
+        return None
+    return timestamp, match.group(2).strip(), match.group(3).strip() if match.group(3) else None
+
+
+def _extract_summary_value(summary: str | None, label: str) -> str | None:
+    if not summary:
+        return None
+    prefix = f"{label}: "
+    for part in (value.strip() for value in summary.split("|")):
+        if part.startswith(prefix):
+            return part.removeprefix(prefix).strip()
+    return None
+
+
+def _extract_cli_arg(command: str | None, option: str) -> str | None:
+    if not command:
+        return None
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.split()
+    for index, part in enumerate(parts[:-1]):
+        if part == option:
+            return parts[index + 1]
+    return None
+
+
+def _key_values(detail: str | None) -> dict[str, str]:
+    if not detail:
+        return {}
+    return {match.group(1): match.group(2) for match in AUDIT_KEY_VALUE_PATTERN.finditer(detail)}
+
+
+def _extract_elapsed_ms(detail: str | None) -> int:
+    return _parse_int(_key_values(detail).get("elapsed_ms")) or 0
+
+
+def _parse_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _is_failure_event(message: str, detail: str | None) -> bool:
+    if message.startswith("FAIL ") or message == "audit_log_failed":
+        return True
+    return "status=failed" in (detail or "")
+
+
+def _duration_seconds(
+    first_timestamp: datetime | None,
+    last_timestamp: datetime | None,
+    elapsed_ms_total: int,
+) -> int | None:
+    if first_timestamp is not None and last_timestamp is not None:
+        return max(0, round((last_timestamp - first_timestamp).total_seconds()))
+    if elapsed_ms_total:
+        return round(elapsed_ms_total / 1000)
+    return None
+
+
+def _format_duration(seconds: int | None) -> str | None:
+    if seconds is None:
+        return None
+    minutes, remaining_seconds = divmod(seconds, 60)
+    hours, remaining_minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{remaining_minutes:02d}min{remaining_seconds:02d}s"
+    if minutes:
+        return f"{minutes}min{remaining_seconds:02d}s"
+    return f"{remaining_seconds}s"
+
+
+def _resolve_history_log_path(audit_dir: Path, run_id: str) -> Path:
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise HTTPException(status_code=400, detail="Invalid run id.")
+    root = audit_dir.resolve()
+    path = (root / f"{run_id}.log").resolve()
+    if path.parent != root:
+        raise HTTPException(status_code=400, detail="Invalid run id.")
+    return path
 
 
 def _upsert_evaluation_event(events: list[EvaluationProgress], event: EvaluationProgress) -> None:
@@ -306,6 +526,10 @@ _INDEX_HTML = """
     body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--ink); background:var(--bg); }
     header { padding:20px 28px 12px; border-bottom:1px solid var(--line); background:#fff; }
     h1 { margin:0 0 6px; font-size:22px; letter-spacing:0; }
+    .tabs { display:flex; gap:8px; padding:12px 28px 0; background:#fff; border-bottom:1px solid var(--line); }
+    .tab-button { min-height:34px; color:var(--muted); background:#fff; border-color:transparent; border-bottom:2px solid transparent; border-radius:0; }
+    .tab-button.active { color:var(--accent); border-bottom-color:var(--accent); }
+    .tab-panel[hidden] { display:none; }
     main { width:min(100%, 1440px); margin:0 auto; padding:20px; display:grid; grid-template-columns: minmax(320px,380px) minmax(0,1fr); gap:18px; }
     section, aside { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; }
     section, aside { min-width:0; }
@@ -314,6 +538,7 @@ _INDEX_HTML = """
     label { display:grid; gap:5px; margin:10px 0; color:var(--muted); font-size:12px; }
     input, select { width:100%; min-height:36px; border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; color:var(--ink); background:#fff; }
     button { border:1px solid var(--accent); background:var(--accent); color:#fff; border-radius:6px; min-height:36px; padding:0 12px; font-weight:650; cursor:pointer; }
+    .button-link { display:inline-flex; align-items:center; min-height:32px; padding:0 10px; border:1px solid var(--accent); border-radius:6px; color:var(--accent); background:#fff; font-size:12px; font-weight:650; text-decoration:none; }
     button.secondary { color:var(--accent); background:#fff; }
     button:disabled { opacity:.55; cursor:not-allowed; }
     .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
@@ -341,6 +566,13 @@ _INDEX_HTML = """
     th, td { text-align:left; border-bottom:1px solid var(--line); padding:8px; }
     .table-wrap { width:100%; max-width:100%; overflow:auto; border:1px solid var(--line); border-radius:8px; margin-top:12px; }
     .table-wrap table { min-width:1180px; margin-top:0; }
+    .history-layout { width:min(100%, 1440px); margin:0 auto; padding:20px; display:grid; grid-template-columns:minmax(0,1fr) minmax(320px,480px); gap:18px; }
+    .history-actions { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+    .history-actions div { display:flex; gap:8px; }
+    .history-row { cursor:pointer; }
+    .history-row:hover { background:#f7fbff; }
+    .history-log { min-height:520px; max-height:calc(100vh - 260px); }
+    .history-export-links { display:flex; gap:8px; white-space:nowrap; }
     .badge { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:2px 7px; font-size:12px; white-space:nowrap; }
     .badge.success { color:var(--ok); border-color:#b7dfc8; background:#f0fbf4; }
     .badge.failed { color:var(--bad); border-color:#f0b8b2; background:#fff5f5; }
@@ -355,7 +587,7 @@ _INDEX_HTML = """
     .ok { color:var(--ok); }
     .bad { color:var(--bad); }
     .muted { color:var(--muted); }
-    @media (max-width: 860px) { main { grid-template-columns:minmax(0,1fr); padding:12px; } }
+    @media (max-width: 860px) { main, .history-layout { grid-template-columns:minmax(0,1fr); padding:12px; } }
   </style>
 </head>
 <body>
@@ -363,7 +595,11 @@ _INDEX_HTML = """
     <h1>Atividade 2 Judge Console</h1>
     <div id="config-status" class="status">Carregando configuracao local...</div>
   </header>
-  <main>
+  <nav class="tabs" aria-label="Navegacao principal">
+    <button class="tab-button active" type="button" data-tab="execution-panel">Execucao</button>
+    <button class="tab-button" type="button" data-tab="history-panel">Execucoes anteriores</button>
+  </nav>
+  <main id="execution-panel" class="tab-panel">
     <aside>
       <h2>Presets</h2>
       <div id="presets" class="presets"></div>
@@ -523,6 +759,48 @@ _INDEX_HTML = """
       </div>
     </section>
   </main>
+  <div id="history-panel" class="history-layout tab-panel" hidden>
+    <section>
+      <div class="history-actions">
+        <h2>Execucoes anteriores</h2>
+        <div>
+          <a class="button-link" href="/api/run-history/export.csv" download="run-history.csv">CSV</a>
+          <a class="button-link" href="/api/run-history/export.json" download="run-history.json">JSON</a>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table aria-label="Tabela de execucoes anteriores">
+          <thead>
+            <tr>
+              <th>Run ID</th>
+              <th>Data/hora</th>
+              <th>Modo</th>
+              <th>Dataset</th>
+              <th>Batch size</th>
+              <th>Sucessos</th>
+              <th>Falhas</th>
+              <th>Duracao</th>
+              <th>Log</th>
+              <th>Exportar</th>
+            </tr>
+          </thead>
+          <tbody id="history-table-body">
+            <tr><td colspan="10" class="muted">Carregando historico.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <aside>
+      <h2>Log</h2>
+      <table>
+        <tbody>
+          <tr><th>Run ID</th><td id="history-log-run-id" class="muted">Selecione uma execucao.</td></tr>
+          <tr><th>Arquivo</th><td id="history-log-path" class="muted">-</td></tr>
+        </tbody>
+      </table>
+      <pre id="history-log-content" class="history-log">Selecione uma execucao.</pre>
+    </aside>
+  </div>
   <dialog id="details-dialog">
     <div class="dialog-head">
       <strong id="details-title">Detalhes da avaliacao</strong>
@@ -540,10 +818,15 @@ _INDEX_HTML = """
   <script>
     let csrfToken = "";
     let pollTimer = null;
+    let historyLoaded = false;
 
     function value(id) { return document.getElementById(id).value; }
     function setText(id, text) { document.getElementById(id).textContent = text ?? "-"; }
     function display(value) { return value === null || value === undefined || value === "" ? "-" : value; }
+    function formatDateTime(value) {
+      if (!value) return "-";
+      return new Date(value).toLocaleString();
+    }
 
     function renderAuditLog(data) {
       const cell = document.getElementById("audit-log");
@@ -739,6 +1022,98 @@ _INDEX_HTML = """
       }
     }
 
+    async function loadHistory() {
+      const response = await fetch("/api/run-history");
+      const data = await response.json();
+      renderHistory(data);
+      historyLoaded = true;
+    }
+
+    function renderHistory(rows) {
+      const body = document.getElementById("history-table-body");
+      body.textContent = "";
+      if (!rows.length) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 10;
+        cell.className = "muted";
+        cell.textContent = "Nenhuma execucao encontrada.";
+        row.appendChild(cell);
+        body.appendChild(row);
+        return;
+      }
+      rows.forEach((entry) => {
+        const row = document.createElement("tr");
+        row.className = "history-row";
+        row.onclick = () => openHistoryLog(entry);
+        for (const value of [
+          entry.run_id,
+          formatDateTime(entry.timestamp),
+          entry.mode,
+          entry.dataset,
+          entry.batch_size,
+          entry.successes,
+          entry.failures,
+          entry.duration
+        ]) appendCell(row, display(value));
+        const logCell = document.createElement("td");
+        const openButton = document.createElement("button");
+        openButton.type = "button";
+        openButton.className = "detail-button";
+        openButton.textContent = "Abrir";
+        openButton.onclick = (event) => {
+          event.stopPropagation();
+          openHistoryLog(entry);
+        };
+        logCell.appendChild(openButton);
+        row.appendChild(logCell);
+        const exportCell = document.createElement("td");
+        const links = document.createElement("span");
+        links.className = "history-export-links";
+        links.appendChild(historyExportLink("CSV", "/api/run-history/export.csv", "run-history.csv"));
+        links.appendChild(historyExportLink("JSON", "/api/run-history/export.json", "run-history.json"));
+        exportCell.appendChild(links);
+        row.appendChild(exportCell);
+        body.appendChild(row);
+      });
+    }
+
+    function historyExportLink(label, href, filename) {
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = filename;
+      link.textContent = label;
+      return link;
+    }
+
+    async function openHistoryLog(entry) {
+      setText("history-log-run-id", entry.run_id);
+      setText("history-log-path", entry.log_path);
+      setText("history-log-content", "Carregando log...");
+      try {
+        const response = await fetch(entry.log_url);
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.detail || "Log nao encontrado.");
+        }
+        setText("history-log-content", await response.text());
+      } catch (error) {
+        setText("history-log-content", error.message);
+      }
+    }
+
+    function switchTab(targetId) {
+      for (const button of document.querySelectorAll(".tab-button")) {
+        const active = button.dataset.tab === targetId;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", String(active));
+      }
+      for (const panel of document.querySelectorAll(".tab-panel")) {
+        panel.hidden = panel.id !== targetId;
+      }
+      if (targetId === "history-panel" && !historyLoaded) loadHistory();
+    }
+
     async function loadConfig() {
       const config = await (await fetch("/api/config")).json();
       csrfToken = config.csrf_token;
@@ -815,6 +1190,9 @@ _INDEX_HTML = """
       };
     }
     document.getElementById("details-close").onclick = () => document.getElementById("details-dialog").close();
+    for (const button of document.querySelectorAll(".tab-button")) {
+      button.onclick = () => switchTab(button.dataset.tab);
+    }
 
     document.getElementById("dry-run").onclick = async () => {
       try {

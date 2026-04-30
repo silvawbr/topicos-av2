@@ -154,6 +154,9 @@ def test_web_index_contains_progress_element() -> None:
     assert 'id="eligible-missing"' in response.text
     assert 'id="execution-table-body"' in response.text
     assert "/api/runs/" in response.text
+    assert "Execucoes anteriores" in response.text
+    assert 'id="history-table-body"' in response.text
+    assert 'id="history-log-content"' in response.text
 
 
 def test_web_index_contains_endpoint_and_advanced_controls() -> None:
@@ -327,3 +330,90 @@ def test_second_run_is_rejected_while_one_is_active() -> None:
     service.release.set()
 
     assert second.status_code == 409
+
+
+def test_run_history_lists_audit_logs_with_metadata(tmp_path) -> None:
+    _write_audit_log(
+        tmp_path / "judge_run_20260430_104512.log",
+        """
+2026-04-30T13:45:12+00:00 | audit_log_started | path=outputs/audit/judge_run_20260430_104512.log
+2026-04-30T13:45:12+00:00 | execution_summary | Judge provider: remote_http | Judge mode: 2plus1 | Judge execution strategy: sequential
+2026-04-30T13:45:12+00:00 | command_preview | .venv/bin/python -m atividade_2.cli run-judge --panel-mode 2plus1 --dataset J2 --batch-size 10 --judge-execution-strategy sequential
+2026-04-30T13:45:20+00:00 | evaluation_parsed | answer_id=1 status=failed
+2026-04-30T13:49:24+00:00 | execution_result | selected=10 executed=8 skipped=0 arbiters=1
+2026-04-30T13:49:24+00:00 | audit_log_finished
+""",
+    )
+    _write_audit_log(
+        tmp_path / "judge_run_20260430_120000.log",
+        """
+2026-04-30T15:00:00+00:00 | audit_log_started | path=outputs/audit/judge_run_20260430_120000.log
+2026-04-30T15:00:00+00:00 | execution_summary | Judge provider: remote_http | Judge mode: single | Judge execution strategy: parallel
+2026-04-30T15:00:00+00:00 | command_preview | .venv/bin/python -m atividade_2.cli run-judge --panel-mode single --dataset J1 --batch-size 1 --judge-execution-strategy parallel
+2026-04-30T15:00:07+00:00 | execution_result | selected=1 executed=1 skipped=0 arbiters=0
+2026-04-30T15:00:07+00:00 | audit_log_finished
+""",
+    )
+    client = TestClient(create_app(FakeRunJudgeService(), audit_dir=tmp_path))
+
+    response = client.get("/api/run-history")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [row["run_id"] for row in data] == ["judge_run_20260430_120000", "judge_run_20260430_104512"]
+    older = data[1]
+    assert older["timestamp"] == "2026-04-30T13:45:12+00:00"
+    assert older["mode"] == "2plus1"
+    assert older["dataset"] == "J2"
+    assert older["batch_size"] == 10
+    assert older["successes"] == 8
+    assert older["failures"] == 1
+    assert older["duration"] == "4min12s"
+    assert older["log_url"] == "/api/run-history/judge_run_20260430_104512/audit-log"
+
+
+def test_run_history_log_endpoint_returns_file_content(tmp_path) -> None:
+    log_path = tmp_path / "judge_run_20260430_104512.log"
+    _write_audit_log(log_path, "2026-04-30T13:45:12+00:00 | audit_log_started\n")
+    client = TestClient(create_app(FakeRunJudgeService(), audit_dir=tmp_path))
+
+    response = client.get("/api/run-history/judge_run_20260430_104512/audit-log")
+
+    assert response.status_code == 200
+    assert response.text == "2026-04-30T13:45:12+00:00 | audit_log_started\n"
+
+
+def test_run_history_exports_csv_and_json(tmp_path) -> None:
+    _write_audit_log(
+        tmp_path / "judge_run_20260430_104512.log",
+        """
+2026-04-30T13:45:12+00:00 | audit_log_started
+2026-04-30T13:45:12+00:00 | execution_summary | Judge mode: single
+2026-04-30T13:45:12+00:00 | command_preview | .venv/bin/python -m atividade_2.cli run-judge --dataset J2 --batch-size 3
+2026-04-30T13:45:13+00:00 | execution_result | selected=3 executed=3 skipped=0 arbiters=0
+""",
+    )
+    client = TestClient(create_app(FakeRunJudgeService(), audit_dir=tmp_path))
+
+    json_response = client.get("/api/run-history/export.json")
+    csv_response = client.get("/api/run-history/export.csv")
+
+    assert json_response.status_code == 200
+    assert json_response.json()[0]["run_id"] == "judge_run_20260430_104512"
+    assert csv_response.status_code == 200
+    assert csv_response.text.splitlines()[0] == (
+        "run_id,timestamp,mode,dataset,batch_size,successes,failures,duration,log_path"
+    )
+    assert "judge_run_20260430_104512,2026-04-30T13:45:12+00:00,single,J2,3,3,0,1s," in csv_response.text
+
+
+def test_run_history_rejects_path_traversal(tmp_path) -> None:
+    client = TestClient(create_app(FakeRunJudgeService(), audit_dir=tmp_path))
+
+    response = client.get("/api/run-history/../secret/audit-log")
+
+    assert response.status_code in {400, 404}
+
+
+def _write_audit_log(path: Path, content: str) -> None:
+    path.write_text(content.strip() + "\n", encoding="utf-8")
