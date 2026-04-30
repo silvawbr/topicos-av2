@@ -227,7 +227,12 @@ class JudgePipeline:
             detail=detail,
             terminal=terminal_progress,
         ):
-            raw_response = self.client.judge(prompt=prompt, model=judge_model.provider_model)
+            raw_response = self.client.judge(
+                prompt=prompt,
+                model=judge_model.provider_model,
+                requested_model=judge_model.requested,
+                endpoint_key=_endpoint_key_for_role(stored_role, config.panel_mode),
+            )
         with self.audit.step(
             f"Parsing judge response for answer {answer.answer_id}",
             detail=detail,
@@ -315,3 +320,13 @@ def _arbiter_reason(config: RuntimeJudgeConfig, score_delta: int) -> str | None:
     if score_delta >= config.arbitration_min_delta:
         return "score_delta"
     return None
+
+
+def _endpoint_key_for_role(stored_role: StoredJudgeRole, panel_mode: str) -> str:
+    if panel_mode == "single":
+        return "JUDGE"
+    if stored_role == "principal":
+        return "JUDGE"
+    if stored_role == "controle":
+        return "SECONDARY_JUDGE"
+    return "ARBITER"

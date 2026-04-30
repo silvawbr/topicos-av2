@@ -54,13 +54,12 @@ def _load_json_object(text: str) -> dict[str, Any]:
     try:
         parsed = json.loads(candidate)
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", candidate, flags=re.DOTALL)
-        if not match:
-            raise JudgeParseError("Judge response does not contain a JSON object.")
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError as error:
-            raise JudgeParseError(f"Judge response contains invalid JSON: {error.msg}.") from error
+        parsed = _load_first_embedded_json_object(candidate)
+        if parsed is None:
+            raise JudgeParseError(
+                "Judge response does not contain a JSON object. "
+                f"Preview: {_sanitized_preview(candidate)}"
+            )
 
     if not isinstance(parsed, dict):
         raise JudgeParseError("Judge response JSON must be an object.")
@@ -71,9 +70,65 @@ def _strip_code_fence(text: str) -> str:
     if not text.startswith("```"):
         return text
     lines = text.splitlines()
-    if len(lines) >= 3 and lines[-1].strip() == "```":
+    if len(lines) >= 3 and re.fullmatch(r"```\s*", lines[-1]):
         return "\n".join(lines[1:-1]).strip()
     return text
+
+
+def _load_first_embedded_json_object(text: str) -> dict[str, Any] | None:
+    for json_object in _iter_balanced_json_objects(text):
+        try:
+            parsed = json.loads(json_object)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _iter_balanced_json_objects(text: str):
+    search_start = 0
+    while True:
+        start = text.find("{", search_start)
+        if start == -1:
+            return
+        end = _balanced_object_end(text, start)
+        if end is not None:
+            yield text[start : end + 1]
+            search_start = end + 1
+        else:
+            search_start = start + 1
+
+
+def _balanced_object_end(text: str, start: int) -> int | None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        character = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+
+        if character == '"':
+            in_string = True
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _sanitized_preview(text: str, *, limit: int = 160) -> str:
+    preview = re.sub(r"\s+", " ", text).strip()
+    return preview[:limit] if preview else "<empty>"
 
 
 def _extract_score(payload: dict[str, Any]) -> int:

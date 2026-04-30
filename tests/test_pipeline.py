@@ -9,8 +9,8 @@ from atividade_2.repositories import InMemoryJudgeRepository
 BASE_ENV = {
     "REMOTE_JUDGE_BASE_URL": "https://example.invalid/v1",
     "REMOTE_JUDGE_API_KEY": "test-key",
-    "REMOTE_JUDGE_MODEL": "m-prometheus-14b",
-    "REMOTE_PRIMARY_JUDGE_PANEL": "gpt-oss-120b,llama-3.3-70b-instruct",
+    "REMOTE_JUDGE_MODEL": "gpt-oss-120b",
+    "REMOTE_SECONDARY_JUDGE_MODEL": "llama-3.3-70b-instruct",
     "REMOTE_ARBITER_JUDGE_MODEL": "m-prometheus-14b",
 }
 
@@ -19,9 +19,18 @@ class FakeJudgeClient:
     def __init__(self, scores: dict[str, int]) -> None:
         self.scores = scores
         self.calls: list[str] = []
+        self.endpoint_keys: list[str | None] = []
 
-    def judge(self, prompt: str, model: str) -> JudgeRawResponse:
+    def judge(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        requested_model: str | None = None,
+        endpoint_key: str | None = None,
+    ) -> JudgeRawResponse:
         self.calls.append(model)
+        self.endpoint_keys.append(endpoint_key)
         score = self.scores[model]
         return JudgeRawResponse(
             text=f'{{"score": {score}, "rationale": "nota {score}"}}',
@@ -47,13 +56,14 @@ def test_single_mode_runs_one_judge() -> None:
     settings = load_settings(dotenv_path=None, env=BASE_ENV)
     config = resolve_runtime_config(settings, panel_mode="single")
     repo = InMemoryJudgeRepository()
-    client = FakeJudgeClient({"Unbabel/M-Prometheus-14B": 5})
+    client = FakeJudgeClient({"openai/gpt-oss-120b": 5})
 
     summary = JudgePipeline(repo, client).run([answer()], config)
 
     assert summary.executed_evaluations == 1
     assert len(repo.records) == 1
     assert repo.records[0].stored_role == "principal"
+    assert client.endpoint_keys == ["JUDGE"]
 
 
 def test_primary_only_runs_panel_without_arbiter() -> None:
@@ -73,6 +83,7 @@ def test_primary_only_runs_panel_without_arbiter() -> None:
     assert summary.executed_evaluations == 2
     assert summary.arbiter_evaluations == 0
     assert client.calls == ["openai/gpt-oss-120b", "meta-llama/Llama-3.3-70B-Instruct"]
+    assert client.endpoint_keys == ["JUDGE", "SECONDARY_JUDGE"]
 
 
 def test_2plus1_skips_arbiter_below_threshold() -> None:
@@ -109,6 +120,7 @@ def test_2plus1_runs_arbiter_at_threshold() -> None:
 
     assert summary.executed_evaluations == 3
     assert summary.arbiter_evaluations == 1
+    assert client.endpoint_keys == ["JUDGE", "SECONDARY_JUDGE", "ARBITER"]
 
 
 def test_always_run_arbiter_forces_execution() -> None:
@@ -133,7 +145,7 @@ def test_duplicate_evaluation_is_skipped() -> None:
     settings = load_settings(dotenv_path=None, env=BASE_ENV)
     config = resolve_runtime_config(settings, panel_mode="single")
     repo = InMemoryJudgeRepository()
-    client = FakeJudgeClient({"Unbabel/M-Prometheus-14B": 5})
+    client = FakeJudgeClient({"openai/gpt-oss-120b": 5})
     pipeline = JudgePipeline(repo, client)
 
     first = pipeline.run([answer()], config)

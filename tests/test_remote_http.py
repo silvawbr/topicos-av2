@@ -14,6 +14,7 @@ class FakeTransport:
         self.response = response
         self.payload: dict[str, Any] | None = None
         self.headers: dict[str, str] | None = None
+        self.url: str | None = None
 
     def post(
         self,
@@ -23,6 +24,7 @@ class FakeTransport:
         payload: dict[str, Any],
         timeout: int,
     ) -> tuple[int, dict[str, Any]]:
+        self.url = url
         self.payload = payload
         self.headers = headers
         return self.status_code, self.response
@@ -50,6 +52,155 @@ def test_remote_client_sends_effective_model() -> None:
     assert transport.headers is not None
     assert transport.headers["Authorization"] == "Bearer secret"
     assert transport.headers["User-Agent"] == "atividade-2-judge/0.1"
+
+
+def test_remote_client_uses_per_judge_endpoint_for_requested_alias() -> None:
+    settings = load_settings(
+        dotenv_path=None,
+        env={
+            "REMOTE_JUDGE_BASE_URL": "https://default.example.invalid/v1",
+            "REMOTE_JUDGE_API_KEY": "default-secret",
+            "REMOTE_JUDGE_GPT_OSS_120B_BASE_URL": "https://gpt.example.invalid/v1",
+            "REMOTE_JUDGE_GPT_OSS_120B_API_KEY": "gpt-secret",
+        },
+    )
+    transport = FakeTransport(
+        200,
+        {"choices": [{"message": {"content": '{"score": 5, "rationale": "ok"}'}}]},
+    )
+    client = RemoteHttpJudgeClient(settings, transport=transport)
+
+    client.judge("prompt", "openai/gpt-oss-120b", requested_model="gpt-oss-120b")
+
+    assert transport.url == "https://gpt.example.invalid/v1/chat/completions"
+    assert transport.headers is not None
+    assert transport.headers["Authorization"] == "Bearer gpt-secret"
+
+
+def test_remote_client_matches_per_judge_endpoint_by_provider_model_leaf() -> None:
+    settings = load_settings(
+        dotenv_path=None,
+        env={
+            "REMOTE_JUDGE_BASE_URL": "https://default.example.invalid/v1",
+            "REMOTE_JUDGE_API_KEY": "default-secret",
+            "REMOTE_JUDGE_GPT_OSS_120B_BASE_URL": "https://gpt.example.invalid/v1",
+            "REMOTE_JUDGE_GPT_OSS_120B_API_KEY": "gpt-secret",
+        },
+    )
+    transport = FakeTransport(
+        200,
+        {"choices": [{"message": {"content": '{"score": 5, "rationale": "ok"}'}}]},
+    )
+    client = RemoteHttpJudgeClient(settings, transport=transport)
+
+    client.judge("prompt", "openai/gpt-oss-120b", requested_model="openai/gpt-oss-120b")
+
+    assert transport.url == "https://gpt.example.invalid/v1/chat/completions"
+    assert transport.headers is not None
+    assert transport.headers["Authorization"] == "Bearer gpt-secret"
+
+
+def test_remote_client_prefers_judge_slot_endpoint_key_over_model_endpoint() -> None:
+    settings = load_settings(
+        dotenv_path=None,
+        env={
+            "REMOTE_JUDGE_BASE_URL": "https://judge.example.invalid/v1",
+            "REMOTE_JUDGE_API_KEY": "judge-secret",
+            "REMOTE_JUDGE_GPT_OSS_120B_BASE_URL": "https://gpt.example.invalid/v1",
+            "REMOTE_JUDGE_GPT_OSS_120B_API_KEY": "gpt-secret",
+        },
+    )
+    transport = FakeTransport(
+        200,
+        {"choices": [{"message": {"content": '{"score": 5, "rationale": "ok"}'}}]},
+    )
+    client = RemoteHttpJudgeClient(settings, transport=transport)
+
+    client.judge(
+        "prompt",
+        "openai/gpt-oss-120b",
+        requested_model="openai/gpt-oss-120b",
+        endpoint_key="JUDGE",
+    )
+
+    assert transport.url == "https://judge.example.invalid/v1/chat/completions"
+    assert transport.headers is not None
+    assert transport.headers["Authorization"] == "Bearer judge-secret"
+
+
+def test_remote_client_routes_2plus1_models_to_role_endpoints() -> None:
+    settings = load_settings(
+        dotenv_path=None,
+        env={
+            "REMOTE_JUDGE_BASE_URL": "https://openrouter.ai/api/v1",
+            "REMOTE_JUDGE_API_KEY": "openrouter-secret",
+            "REMOTE_SECONDARY_JUDGE_BASE_URL": "https://api.groq.com/openai/v1",
+            "REMOTE_SECONDARY_JUDGE_API_KEY": "groq-secret",
+            "REMOTE_ARBITER_JUDGE_BASE_URL": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "REMOTE_ARBITER_JUDGE_API_KEY": "gemini-secret",
+        },
+    )
+    transport = FakeTransport(
+        200,
+        {"choices": [{"message": {"content": '{"score": 5, "rationale": "ok"}'}}]},
+    )
+    client = RemoteHttpJudgeClient(settings, transport=transport)
+
+    client.judge(
+        "prompt",
+        "gemini-2.5-flash",
+        requested_model="gemini-2.5-flash",
+        endpoint_key="ARBITER",
+    )
+
+    assert transport.url == "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    assert transport.payload is not None
+    assert transport.payload["model"] == "gemini-2.5-flash"
+    assert transport.headers is not None
+    assert transport.headers["Authorization"] == "Bearer gemini-secret"
+
+    client.judge(
+        "prompt",
+        "llama-3.3-70b-versatile",
+        requested_model="llama-3.3-70b-versatile",
+        endpoint_key="SECONDARY_JUDGE",
+    )
+
+    assert transport.url == "https://api.groq.com/openai/v1/chat/completions"
+    assert transport.payload["model"] == "llama-3.3-70b-versatile"
+    assert transport.headers["Authorization"] == "Bearer groq-secret"
+
+    client.judge(
+        "prompt",
+        "openai/gpt-oss-120b:free",
+        requested_model="openai/gpt-oss-120b:free",
+        endpoint_key="JUDGE",
+    )
+
+    assert transport.url == "https://openrouter.ai/api/v1/chat/completions"
+    assert transport.payload["model"] == "openai/gpt-oss-120b:free"
+    assert transport.headers["Authorization"] == "Bearer openrouter-secret"
+
+
+def test_remote_client_falls_back_to_global_endpoint_without_role_endpoint() -> None:
+    settings = load_settings(
+        dotenv_path=None,
+        env={
+            "REMOTE_JUDGE_BASE_URL": "https://api.groq.com/openai/v1",
+            "REMOTE_JUDGE_API_KEY": "global-secret",
+        },
+    )
+    transport = FakeTransport(
+        200,
+        {"choices": [{"message": {"content": '{"score": 5, "rationale": "ok"}'}}]},
+    )
+    client = RemoteHttpJudgeClient(settings, transport=transport)
+
+    client.judge("prompt", "llama-3.3-70b-versatile", endpoint_key="SECONDARY_JUDGE")
+
+    assert transport.url == "https://api.groq.com/openai/v1/chat/completions"
+    assert transport.headers is not None
+    assert transport.headers["Authorization"] == "Bearer global-secret"
 
 
 def test_remote_client_handles_non_2xx() -> None:

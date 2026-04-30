@@ -11,8 +11,8 @@ BASE_ENV = {
     "REMOTE_JUDGE_BASE_URL": "https://example.invalid/v1",
     "REMOTE_JUDGE_API_KEY": "test-key",
     "JUDGE_PANEL_MODE": "2plus1",
-    "REMOTE_JUDGE_MODEL": "m-prometheus-14b",
-    "REMOTE_PRIMARY_JUDGE_PANEL": "gpt-oss-120b,llama-3.3-70b-instruct",
+    "REMOTE_JUDGE_MODEL": "gpt-oss-120b",
+    "REMOTE_SECONDARY_JUDGE_MODEL": "llama-3.3-70b-instruct",
     "REMOTE_ARBITER_JUDGE_MODEL": "m-prometheus-14b",
     "JUDGE_EXECUTION_STRATEGY": "sequential",
 }
@@ -21,13 +21,47 @@ BASE_ENV = {
 def test_settings_load_default_models_from_env() -> None:
     settings = load_settings(dotenv_path=None, env=BASE_ENV)
 
-    assert settings.remote_judge_default_model == "m-prometheus-14b"
-    assert settings.remote_primary_judge_panel == (
-        "gpt-oss-120b",
-        "llama-3.3-70b-instruct",
-    )
+    assert settings.remote_judge_base_url == "https://example.invalid/v1"
+    assert settings.remote_judge_api_key == "test-key"
+    assert settings.remote_judge_endpoints == {}
+    assert settings.remote_judge_default_model == "gpt-oss-120b"
+    assert settings.remote_secondary_judge_model == "llama-3.3-70b-instruct"
     assert settings.remote_arbiter_judge_model == "m-prometheus-14b"
     assert settings.judge_execution_strategy == "sequential"
+
+
+def test_dotenv_values_override_process_environment(tmp_path) -> None:
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text(
+        "\n".join(
+            [
+                "REMOTE_JUDGE_BASE_URL=https://dotenv.example.invalid/v1",
+                "REMOTE_JUDGE_API_KEY=dotenv-key",
+                "REMOTE_JUDGE_MODEL=openai/gpt-oss-120b",
+                "REMOTE_SECONDARY_JUDGE_MODEL=llama-3.3-70b-versatile",
+                "REMOTE_ARBITER_JUDGE_MODEL=gemini-2.5-flash",
+                "JUDGE_EXECUTION_STRATEGY=parallel",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    env = {
+        "REMOTE_JUDGE_BASE_URL": "https://env.example.invalid/v1",
+        "REMOTE_JUDGE_API_KEY": "env-key",
+        "REMOTE_JUDGE_MODEL": "gpt-oss-120b",
+        "REMOTE_SECONDARY_JUDGE_MODEL": "llama-3.3-70b-instruct",
+        "REMOTE_ARBITER_JUDGE_MODEL": "m-prometheus-14b",
+        "JUDGE_EXECUTION_STRATEGY": "sequential",
+    }
+
+    settings = load_settings(dotenv_path=dotenv_path, env=env)
+
+    assert settings.remote_judge_base_url == "https://dotenv.example.invalid/v1"
+    assert settings.remote_judge_api_key == "dotenv-key"
+    assert settings.remote_judge_default_model == "openai/gpt-oss-120b"
+    assert settings.remote_secondary_judge_model == "llama-3.3-70b-versatile"
+    assert settings.remote_arbiter_judge_model == "gemini-2.5-flash"
+    assert settings.judge_execution_strategy == "parallel"
 
 
 def test_judge_model_cli_override_forces_single_mode() -> None:
@@ -39,15 +73,31 @@ def test_judge_model_cli_override_forces_single_mode() -> None:
     assert config.single_judge.provider_model == "custom/provider"
 
 
-def test_primary_panel_cli_override_wins() -> None:
+def test_primary_judges_can_be_overridden_by_cli() -> None:
     settings = load_settings(dotenv_path=None, env=BASE_ENV)
     config = resolve_runtime_config(
         settings,
         panel_mode="primary_only",
-        primary_judge_panel="model-a,model-b",
+        judge_model="model-a",
+        secondary_judge_model="model-b",
     )
 
     assert [model.provider_model for model in config.primary_panel] == ["model-a", "model-b"]
+
+
+def test_primary_panel_can_be_resolved_from_first_and_second_judge_models() -> None:
+    env = dict(BASE_ENV)
+    env["REMOTE_JUDGE_MODEL"] = "gpt-oss-120b"
+    env["REMOTE_SECONDARY_JUDGE_MODEL"] = "llama-3.3-70b-instruct"
+    settings = load_settings(dotenv_path=None, env=env)
+
+    config = resolve_runtime_config(settings, panel_mode="primary_only")
+
+    assert settings.remote_secondary_judge_model == "llama-3.3-70b-instruct"
+    assert [model.provider_model for model in config.primary_panel] == [
+        "openai/gpt-oss-120b",
+        "meta-llama/Llama-3.3-70B-Instruct",
+    ]
 
 
 def test_arbiter_cli_override_wins() -> None:
@@ -69,6 +119,26 @@ def test_remote_http_requires_base_url() -> None:
 
     with pytest.raises(ConfigurationError, match="REMOTE_JUDGE_BASE_URL"):
         resolve_runtime_config(settings, panel_mode="single")
+
+
+def test_settings_load_per_judge_endpoint_overrides() -> None:
+    env = dict(BASE_ENV)
+    env["REMOTE_JUDGE_GPT_OSS_120B_BASE_URL"] = "https://gpt.example.invalid/v1"
+    env["REMOTE_JUDGE_GPT_OSS_120B_API_KEY"] = "gpt-key"
+
+    settings = load_settings(dotenv_path=None, env=env)
+
+    endpoint = settings.remote_judge_endpoints["GPT_OSS_120B"]
+    assert endpoint.base_url == "https://gpt.example.invalid/v1"
+    assert endpoint.api_key == "gpt-key"
+
+
+def test_per_judge_endpoint_requires_url_and_key_together() -> None:
+    env = dict(BASE_ENV)
+    env["REMOTE_JUDGE_GPT_OSS_120B_BASE_URL"] = "https://gpt.example.invalid/v1"
+
+    with pytest.raises(ConfigurationError, match="REMOTE_JUDGE_GPT_OSS_120B"):
+        load_settings(dotenv_path=None, env=env)
 
 
 def test_execution_strategy_cli_override_wins() -> None:

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import re
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .audit import AuditLogger
 from .config import ConfigurationError, load_settings, resolve_runtime_config
@@ -31,11 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_judge.add_argument("--judge-provider", choices=["remote_http"])
     run_judge.add_argument("--panel-mode", choices=["single", "primary_only", "2plus1"])
-    run_judge.add_argument("--judge-model", help="Single judge alias or provider model id.")
-    run_judge.add_argument(
-        "--primary-judge-panel",
-        help="Comma-separated primary judge aliases or provider model ids.",
-    )
+    run_judge.add_argument("--judge-model", help="Judge 1 alias or provider model id.")
+    run_judge.add_argument("--secondary-judge-model", help="Judge 2 alias or provider model id.")
     run_judge.add_argument("--arbiter-judge-model", help="Arbiter alias or provider model id.")
     run_judge.add_argument(
         "--always-run-arbiter",
@@ -101,7 +100,7 @@ def run_judge_command(args: argparse.Namespace) -> int:
             "Resolving judge mode and models",
             detail=(
                 f"panel_mode_cli={args.panel_mode} judge_model_cli={_present(args.judge_model)} "
-                f"primary_panel_cli={_present(args.primary_judge_panel)} "
+                f"secondary_judge_cli={_present(args.secondary_judge_model)} "
                 f"arbiter_cli={_present(args.arbiter_judge_model)} "
                 f"execution_strategy_cli={_present(args.judge_execution_strategy)}"
             ),
@@ -111,7 +110,7 @@ def run_judge_command(args: argparse.Namespace) -> int:
                 judge_provider=args.judge_provider,
                 panel_mode=args.panel_mode,
                 judge_model=args.judge_model,
-                primary_judge_panel=args.primary_judge_panel,
+                secondary_judge_model=args.secondary_judge_model,
                 arbiter_judge_model=args.arbiter_judge_model,
                 always_run_arbiter=args.always_run_arbiter,
                 execution_strategy=args.judge_execution_strategy,
@@ -175,14 +174,17 @@ def format_execution_summary(config: RuntimeJudgeConfig) -> str:
         lines.extend(
             [
                 "Judge model:",
-                format_model_mapping(config.single_judge),
+                _format_model_with_endpoint(config, config.single_judge, "SINGLE"),
                 f"Model source: {config.model_source}",
             ]
         )
         return "\n".join(lines)
 
     lines.append("Primary judges:")
-    lines.extend(format_model_mapping(model) for model in config.primary_panel)
+    lines.extend(
+        _format_model_with_endpoint(config, model, endpoint_key)
+        for model, endpoint_key in zip(config.primary_panel, ("JUDGE", "SECONDARY_JUDGE"), strict=True)
+    )
     if config.panel_mode == "primary_only":
         lines.extend(
             [
@@ -196,7 +198,7 @@ def format_execution_summary(config: RuntimeJudgeConfig) -> str:
     lines.extend(
         [
             "Arbiter:",
-            format_model_mapping(config.arbiter),
+            _format_model_with_endpoint(config, config.arbiter, "ARBITER"),
             f"Arbitration min delta: {config.arbitration_min_delta}",
             f"Always run arbiter: {str(config.always_run_arbiter).lower()}",
             f"Model source: {config.model_source}",
@@ -224,6 +226,46 @@ def _resolve_audit_path(raw_path: str | None) -> Path:
 
 def _present(value: str | None) -> str:
     return "provided" if value else "not_provided"
+
+
+def _format_model_with_endpoint(config: RuntimeJudgeConfig, model, endpoint_key: str) -> str:
+    mapping = format_model_mapping(model)
+    endpoint = _resolve_endpoint_base_url(config, model, endpoint_key)
+    host = _endpoint_host(endpoint)
+    return f"{mapping} | endpoint={host}"
+
+
+def _resolve_endpoint_base_url(config: RuntimeJudgeConfig, model, endpoint_key: str) -> str | None:
+    normalized_endpoint_key = _endpoint_key(endpoint_key)
+    if normalized_endpoint_key == "JUDGE":
+        return config.settings.remote_judge_base_url
+    endpoint = config.settings.remote_judge_endpoints.get(normalized_endpoint_key)
+    if endpoint is not None:
+        return endpoint.base_url
+    for candidate in (model.requested, model.provider_model):
+        for key in _endpoint_keys(candidate):
+            endpoint = config.settings.remote_judge_endpoints.get(key)
+            if endpoint is not None:
+                return endpoint.base_url
+    return config.settings.remote_judge_base_url
+
+
+def _endpoint_keys(model: str) -> tuple[str, ...]:
+    keys = [_endpoint_key(model)]
+    if "/" in model:
+        keys.append(_endpoint_key(model.rsplit("/", 1)[-1]))
+    return tuple(dict.fromkeys(key for key in keys if key))
+
+
+def _endpoint_key(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]+", "_", value.upper()).strip("_")
+
+
+def _endpoint_host(base_url: str | None) -> str:
+    if not base_url:
+        return "<missing>"
+    host = urlparse(base_url).hostname
+    return host or "<invalid>"
 
 
 if __name__ == "__main__":

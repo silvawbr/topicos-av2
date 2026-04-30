@@ -2,7 +2,7 @@
 
 Implementação de framework **LLM-as-a-Judge** com persistência em PostgreSQL para a disciplina de Tópicos Avançados em Engenharia de Software e Sistemas de Informação.
 
-Este repositório está no estágio de fundação do projeto: ambiente Python, testes, PostgreSQL local, restore do backup inicial e geração de backup auditável. A pipeline completa de julgamento por LLM ainda não está implementada.
+Este repositório contém a fundação local do projeto e a pipeline inicial de julgamento por LLM: ambiente Python, testes, PostgreSQL local, restore do backup inicial, execução de juízes remotos HTTP, persistência das avaliações e geração de backups auditáveis.
 
 ## Requisitos
 
@@ -17,6 +17,7 @@ Este repositório está no estágio de fundação do projeto: ambiente Python, t
 - `resources/`: entradas estáveis e fixtures.
 - `outputs/`: artefatos gerados localmente.
 - `outputs/backup/`: backups SQL gerados por `make db-backup`.
+- `outputs/audit/`: logs locais gerados por `run-judge`.
 - `scripts/`: automações locais de banco.
 - `backup_atividade_2.sql`: backup SQL inicial usado para restaurar o banco AV2.
 
@@ -129,8 +130,10 @@ Estas dependem do endpoint de cada pessoa:
 | Variável | O que colocar |
 |---|---|
 | `REMOTE_JUDGE_BASE_URL` | URL base do endpoint. Ex.: `https://.../v1`. |
-| `REMOTE_JUDGE_API_KEY` | Chave/token do endpoint. Não commit. |
-| `REMOTE_JUDGE_MODEL` | Modelo para smoke test em modo `single`. Use um modelo que seu endpoint suporta. |
+| `REMOTE_JUDGE_API_KEY` | Chave/token default do endpoint. Não commit. |
+| `REMOTE_JUDGE_MODEL` | Juiz 1. Também é usado no modo `single`. |
+| `REMOTE_SECONDARY_JUDGE_MODEL` | Juiz 2 do painel. |
+| `REMOTE_ARBITER_JUDGE_MODEL` | Juiz árbitro. |
 
 Exemplo mínimo:
 
@@ -139,9 +142,30 @@ JUDGE_PROVIDER=remote_http
 REMOTE_JUDGE_BASE_URL=https://seu-endpoint.example.com/v1
 REMOTE_JUDGE_API_KEY=sua-chave-local
 JUDGE_PANEL_MODE=single
-REMOTE_JUDGE_MODEL=openai/gpt-oss-120b
+REMOTE_JUDGE_MODEL=gpt-oss-120b
+REMOTE_SECONDARY_JUDGE_MODEL=llama-3.3-70b-instruct
+REMOTE_ARBITER_JUDGE_MODEL=m-prometheus-14b
 REMOTE_JUDGE_OPENAI_COMPATIBLE=true
 ```
+
+#### Endpoint e chave por juiz
+
+`REMOTE_JUDGE_BASE_URL` e `REMOTE_JUDGE_API_KEY` configuram o endpoint do juiz 1. Se cada juiz roda em um provedor diferente, defina também uma URL e uma key para os outros slots do painel.
+
+Formato:
+
+```env
+REMOTE_JUDGE_BASE_URL=https://endpoint-do-juiz-1.example.com/v1
+REMOTE_JUDGE_API_KEY=chave-do-juiz-1
+
+REMOTE_SECONDARY_JUDGE_BASE_URL=https://endpoint-do-juiz-2.example.com/v1
+REMOTE_SECONDARY_JUDGE_API_KEY=chave-do-juiz-2
+
+REMOTE_ARBITER_JUDGE_BASE_URL=https://endpoint-do-arbitro.example.com/v1
+REMOTE_ARBITER_JUDGE_API_KEY=chave-do-arbitro
+```
+
+O modo `single` usa `REMOTE_JUDGE_MODEL`, o mesmo modelo do juiz 1. Se só a URL ou só a key específica for configurada, a validação falha antes da execução. Se não houver endpoint específico para o slot, a chamada usa o endpoint global.
 
 #### Variáveis que normalmente ficam no padrão
 
@@ -150,14 +174,15 @@ REMOTE_JUDGE_OPENAI_COMPATIBLE=true
 | `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/app_dev` | Se seu banco usa outra porta, usuário ou database. |
 | `JUDGE_PROVIDER` | `remote_http` | Não mude por enquanto. |
 | `JUDGE_PANEL_MODE` | `2plus1` | Use `single` para smoke test barato. |
-| `REMOTE_PRIMARY_JUDGE_PANEL` | `gpt-oss-120b,llama-3.3-70b-instruct` | Se o endpoint não tiver esses modelos. |
-| `REMOTE_ARBITER_JUDGE_MODEL` | `m-prometheus-14b` | Se o endpoint não tiver esse modelo. |
+| `REMOTE_JUDGE_MODEL` | `gpt-oss-120b` | Juiz 1 e modelo do modo `single`. |
+| `REMOTE_SECONDARY_JUDGE_MODEL` | `llama-3.3-70b-instruct` | Juiz 2 do painel. |
+| `REMOTE_ARBITER_JUDGE_MODEL` | `m-prometheus-14b` | Juiz árbitro. |
 | `JUDGE_ARBITRATION_MIN_DELTA` | `2` | Para arbitragem mais ou menos sensível. |
 | `JUDGE_ALWAYS_RUN_ARBITER` | `false` | Use `true` só para auditoria/amostra. |
 | `JUDGE_EXECUTION_STRATEGY` | `sequential` | Use `parallel` quando o endpoint aceitar concorrência. |
 | `REMOTE_JUDGE_TIMEOUT_SECONDS` | `180` | Para modelos lentos. |
 | `REMOTE_JUDGE_TEMPERATURE` | `0.0` | Mantenha assim para avaliação mais determinística. |
-| `REMOTE_JUDGE_MAX_TOKENS` | `1200` | Se a justificativa vier cortada. |
+| `REMOTE_JUDGE_MAX_TOKENS` | `4000` | Reduza só se o endpoint tiver limite baixo; Gemini truncou JSON com valores menores nos testes. |
 | `REMOTE_JUDGE_TOP_P` | `1.0` | Normalmente não precisa mudar. |
 | `REMOTE_JUDGE_OPENAI_COMPATIBLE` | `true` | Use `false` só para endpoint JSON não OpenAI. |
 | `JUDGE_SAVE_RAW_RESPONSE` | `true` | Use `false` se não quiser manter a resposta bruta no run. |
@@ -165,8 +190,10 @@ REMOTE_JUDGE_OPENAI_COMPATIBLE=true
 Precedência:
 
 ```text
-argumento CLI > .env > default do código > erro de validação
+.env > ambiente do processo > default do código > erro de validação
 ```
+
+Para parâmetros passados diretamente ao `run-judge`, a CLI continua tendo precedência sobre a configuração resolvida do `.env`.
 
 ### Modelos juízes selecionados
 
@@ -206,7 +233,8 @@ Override por execução:
 ```bash
 .venv/bin/python -m atividade_2.cli run-judge \
   --panel-mode primary_only \
-  --primary-judge-panel gpt-oss-120b,llama-3.3-70b-instruct \
+  --judge-model gpt-oss-120b \
+  --secondary-judge-model llama-3.3-70b-instruct \
   --judge-execution-strategy parallel \
   --dataset J2 \
   --limit 10
@@ -248,7 +276,8 @@ Rodar exatamente dois juízes:
 ```bash
 .venv/bin/python -m atividade_2.cli run-judge \
   --panel-mode primary_only \
-  --primary-judge-panel gpt-oss-120b,llama-3.3-70b-instruct \
+  --judge-model gpt-oss-120b \
+  --secondary-judge-model llama-3.3-70b-instruct \
   --dataset J2 \
   --limit 10
 ```
@@ -278,6 +307,7 @@ Toda execução de `run-judge` grava um log detalhado em arquivo e também mostr
 
 - Terminal: mostra cada etapa principal, com pontos dinâmicos em operações longas quando o terminal suporta animação.
 - Arquivo: grava timestamps UTC, configuração resolvida sem segredos, seleção de respostas, chamadas por resposta/modelo, parsing, persistência, skips e resumo final.
+- Resumo de execução: inclui os modelos efetivos e o host de cada endpoint resolvido.
 - Padrão: `outputs/audit/judge_run_YYYYmmdd_HHMMSS.log`.
 - Logs locais em `outputs/audit/*.log` são ignorados pelo Git.
 
@@ -318,6 +348,8 @@ O mesmo padrão vale para vLLM, llama.cpp, LM Studio ou proxy Ollama. Trocar end
 ### Persistência
 
 Cada juiz executado gera uma linha individual em `avaliacoes_juiz`. O campo `chain_of_thought` é usado como justificativa auditável curta, não como raciocínio privado. A pipeline adiciona colunas opcionais de metadados de painel (`papel_juiz`, `rodada_julgamento`, `motivo_acionamento`) se o schema restaurado ainda não as tiver.
+
+O prompt instrui o juiz a retornar apenas um objeto JSON bruto, sem markdown nem texto extra. O parser aceita JSON puro, blocos cercados por crase e respostas com texto antes/depois do primeiro objeto JSON válido, mas rejeita nota fora da escala 1-5 ou justificativa ausente/vazia.
 
 ### Backup e restore
 

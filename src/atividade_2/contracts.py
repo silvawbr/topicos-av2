@@ -24,6 +24,14 @@ class ModelSpec:
 
 
 @dataclass(frozen=True)
+class RemoteJudgeEndpoint:
+    """Per-judge remote endpoint override."""
+
+    base_url: str
+    api_key: str
+
+
+@dataclass(frozen=True)
 class JudgeSettings:
     """Settings loaded from ``.env`` and process environment."""
 
@@ -31,9 +39,10 @@ class JudgeSettings:
     judge_provider: JudgeProvider
     remote_judge_base_url: str | None
     remote_judge_api_key: str | None
+    remote_judge_endpoints: dict[str, RemoteJudgeEndpoint]
     judge_panel_mode: PanelMode
     remote_judge_default_model: str | None
-    remote_primary_judge_panel: tuple[str, ...]
+    remote_secondary_judge_model: str | None
     remote_arbiter_judge_model: str | None
     judge_arbitration_min_delta: int
     judge_always_run_arbiter: bool
