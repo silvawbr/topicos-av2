@@ -136,3 +136,15 @@ class PipelineSummary:
     executed_evaluations: int
     skipped_evaluations: int
     arbiter_evaluations: int
+
+
+@dataclass(frozen=True)
+class BatchProgress:
+    """Structured batch progress for terminal, audit logs, and web UIs."""
+
+    current: int
+    total: int
+    percent: int
+    executed_evaluations: int
+    skipped_evaluations: int
+    arbiter_evaluations: int

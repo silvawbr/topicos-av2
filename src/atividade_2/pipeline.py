@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 
 from .audit import AuditEvent, NullAuditLogger
 from .contracts import (
+    BatchProgress,
     CandidateAnswerContext,
     EvaluationRecord,
     ModelSpec,
@@ -28,10 +29,12 @@ class JudgePipeline:
         repository: JudgeRepositoryProtocol,
         client: JudgeClient,
         audit: NullAuditLogger | None = None,
+        progress_callback: Callable[[BatchProgress], None] | None = None,
     ) -> None:
         self.repository = repository
         self.client = client
         self.audit = audit or NullAuditLogger()
+        self.progress_callback = progress_callback
 
     def run(
         self,
@@ -41,8 +44,20 @@ class JudgePipeline:
         executed = 0
         skipped = 0
         arbiters = 0
+        total_answers = len(answers)
+        if total_answers == 0:
+            self._report_batch_progress(
+                BatchProgress(
+                    current=0,
+                    total=0,
+                    percent=100,
+                    executed_evaluations=0,
+                    skipped_evaluations=0,
+                    arbiter_evaluations=0,
+                )
+            )
 
-        for answer in answers:
+        for index, answer in enumerate(answers, start=1):
             self.audit.terminal_event(f"Running answer {answer.answer_id} ({answer.dataset_name})")
             self.audit.event(
                 AuditEvent(
@@ -57,6 +72,16 @@ class JudgePipeline:
             executed += result.executed_evaluations
             skipped += result.skipped_evaluations
             arbiters += result.arbiter_evaluations
+            self._report_batch_progress(
+                BatchProgress(
+                    current=index,
+                    total=total_answers,
+                    percent=int(index / total_answers * 100) if total_answers else 100,
+                    executed_evaluations=executed,
+                    skipped_evaluations=skipped,
+                    arbiter_evaluations=arbiters,
+                )
+            )
             self.audit.event(
                 AuditEvent(
                     "answer_finished",
@@ -73,6 +98,30 @@ class JudgePipeline:
             skipped_evaluations=skipped,
             arbiter_evaluations=arbiters,
         )
+
+    def _report_batch_progress(self, progress: BatchProgress) -> None:
+        self.audit.terminal_event(
+            (
+                f"Batch progress: {progress.current}/{progress.total} answers ({progress.percent}%) | "
+                f"executed={progress.executed_evaluations} skipped={progress.skipped_evaluations} "
+                f"arbiters={progress.arbiter_evaluations}"
+            )
+        )
+        self.audit.event(
+            AuditEvent(
+                "batch_progress",
+                (
+                    f"current={progress.current} total={progress.total} percent={progress.percent} "
+                    f"executed={progress.executed_evaluations} skipped={progress.skipped_evaluations} "
+                    f"arbiters={progress.arbiter_evaluations}"
+                ),
+            )
+        )
+        if self.progress_callback is not None:
+            try:
+                self.progress_callback(progress)
+            except Exception as error:
+                self.audit.event(AuditEvent("batch_progress_callback_failed", f"error={error}"))
 
     def _run_answer(self, answer: CandidateAnswerContext, config: RuntimeJudgeConfig) -> PipelineSummary:
         if config.panel_mode == "single":
