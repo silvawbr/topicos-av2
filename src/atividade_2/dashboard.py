@@ -118,6 +118,7 @@ def build_dashboard_payload(
             "score_distribution": _score_distribution(scored_rows),
             "score_distribution_by_model": _score_distribution_by_model(scored_rows),
             "judge_average": _average_by(scored_rows, "judge_model"),
+            "reference_alignment": _reference_alignment_points(scored_rows, filters.dataset),
             "divergences": _divergence_chart(divergence_cases),
             "critical_cases": _critical_chart(critical_cases),
             "rubric_heatmap": _rubric_heatmap(scored_rows),
@@ -152,7 +153,13 @@ def spearman(xs: list[float], ys: list[float]) -> dict[str, Any]:
     rho = _pearson(ranked_x, ranked_y)
     if rho is None:
         return _spearman_unavailable(sample_size, "Variância insuficiente para Spearman.")
-    return {"value": round(rho, 4), "sample_size": sample_size, "available": True, "note": "Calculado com ranks médios para empates."}
+    return {
+        "value": round(rho, 4),
+        "p_value": _spearman_p_value(rho, sample_size),
+        "sample_size": sample_size,
+        "available": True,
+        "note": "Calculado com ranks médios para empates; p-value aproximado.",
+    }
 
 
 def _fetch_evaluation_rows(cursor: Any, filters: DashboardFilters) -> list[dict[str, Any]]:
@@ -307,6 +314,41 @@ def _primary_spearman(rows: list[dict[str, Any]], selected_dataset: str) -> dict
             "J1 não possui nota humana/rubrica ordinal persistida para calcular Spearman principal.",
         )
     return _spearman_unavailable(0, "Selecione J1 ou J2 para Spearman principal sem misturar tarefas.")
+
+
+def _reference_alignment_points(rows: list[dict[str, Any]], selected_dataset: str) -> dict[str, Any]:
+    points = []
+    for row in rows:
+        reference_score = _reference_score(row, selected_dataset)
+        judge_score = row.get("score")
+        if reference_score is None or judge_score is None:
+            continue
+        points.append(
+            {
+                "evaluation_id": row["evaluation_id"],
+                "answer_id": row["answer_id"],
+                "question_id": row["question_id"],
+                "dataset": row["dataset"],
+                "candidate_model": row["candidate_model"],
+                "judge_model": row["judge_model"],
+                "reference_score": round(float(reference_score), 4),
+                "judge_score": int(judge_score),
+            }
+        )
+    return {
+        "points": points,
+        "x_label": "nota humana / score derivado do gabarito",
+        "y_label": "nota do juiz",
+    }
+
+
+def _reference_score(row: dict[str, Any], selected_dataset: str) -> float | None:
+    dataset = row.get("dataset")
+    if selected_dataset.upper() == "J2" or dataset == "J2":
+        return _j2_reference_score(row)
+    if selected_dataset.upper() == "J1" or dataset == "J1":
+        return _j1_reference_score(row)
+    return None
 
 
 def _judge_arbiter_spearman(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -534,8 +576,18 @@ def _pearson(xs: list[float], ys: list[float]) -> float | None:
     return numerator / denominator
 
 
+def _spearman_p_value(rho: float, sample_size: int) -> float | None:
+    if sample_size <= 2:
+        return None
+    if abs(rho) >= 1:
+        return 0.0
+    t_value = abs(rho) * math.sqrt((sample_size - 2) / (1 - rho**2))
+    p_value = math.erfc(t_value / math.sqrt(2))
+    return round(max(0.0, min(1.0, p_value)), 6)
+
+
 def _spearman_unavailable(sample_size: int, note: str) -> dict[str, Any]:
-    return {"value": None, "sample_size": sample_size, "available": False, "note": note}
+    return {"value": None, "p_value": None, "sample_size": sample_size, "available": False, "note": note}
 
 
 def _serialize_filters(filters: DashboardFilters) -> dict[str, Any]:

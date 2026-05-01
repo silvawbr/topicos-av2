@@ -761,6 +761,13 @@ _INDEX_HTML = """
     .heatmap-head { background:#eef3f8; color:var(--ink); font-weight:750; border-color:var(--line); }
     .heatmap-model { justify-content:flex-start; background:#f8fafc; color:var(--ink); font-weight:750; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .heatmap-value { color:#111827; font-weight:750; }
+    .scatter-wrap { width:100%; overflow:auto; border:1px solid var(--line); border-radius:8px; background:#fbfcfe; }
+    .scatter-svg { display:block; width:100%; min-width:680px; height:auto; }
+    .scatter-axis { stroke:#9aa7b7; stroke-width:1; }
+    .scatter-grid { stroke:#e5e9f0; stroke-width:1; }
+    .scatter-point { fill:#1769aa; fill-opacity:.72; stroke:#fff; stroke-width:1.5; }
+    .scatter-label { fill:var(--muted); font-size:12px; }
+    .scatter-stat { fill:var(--ink); font-size:13px; font-weight:750; }
     .bar-row { display:grid; grid-template-columns:minmax(82px,132px) minmax(88px,1fr) 104px; gap:8px; align-items:center; margin:7px 0; font-size:12px; }
     .bar-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
     .bar-track { height:14px; border-radius:999px; background:#e5e9f0; overflow:hidden; box-shadow:inset 0 0 0 1px rgba(24,33,47,.03); }
@@ -864,7 +871,8 @@ _INDEX_HTML = """
           <div id="dashboard-model-carousel-dots" class="carousel-tabs" role="tablist" aria-label="Paginas do dashboard">
             <button class="carousel-tab active" type="button" data-carousel-index="0" role="tab" aria-selected="true">Indicadores gerais</button>
             <button class="carousel-tab" type="button" data-carousel-index="1" role="tab" aria-selected="false">Distribuicao das notas por modelo</button>
-            <button class="carousel-tab" type="button" data-carousel-index="2" role="tab" aria-selected="false">Heatmap rubrica</button>
+            <button class="carousel-tab" type="button" data-carousel-index="2" role="tab" aria-selected="false">Juiz x referencia</button>
+            <button class="carousel-tab" type="button" data-carousel-index="3" role="tab" aria-selected="false">Heatmap rubrica</button>
           </div>
           <div class="carousel-controls" aria-label="Navegacao do carousel">
             <button id="dashboard-model-carousel-prev" class="carousel-button" type="button" aria-label="Pagina anterior">&lsaquo;</button>
@@ -903,6 +911,10 @@ _INDEX_HTML = """
             <div class="dashboard-carousel-slide">
               <h3>Distribuicao das notas por modelo</h3>
               <div id="dashboard-model-distribution-chart" class="model-distribution-list"></div>
+            </div>
+            <div class="dashboard-carousel-slide">
+              <h3>Correlacao juiz x referencia humana/gabarito</h3>
+              <div id="dashboard-reference-scatter" class="scatter-wrap"></div>
             </div>
             <div class="dashboard-carousel-slide">
               <h3>Heatmap modelo x dimensao da rubrica</h3>
@@ -1293,6 +1305,7 @@ _INDEX_HTML = """
       populateSelect("dashboard_judge_model", data.options?.judge_models || [], selectedValues("dashboard_judge_model"));
       renderDashboardCards(data.cards || {});
       renderModelDistributionChart(data.charts?.score_distribution_by_model || []);
+      renderReferenceScatter(data.charts?.reference_alignment || {}, data.cards?.spearman_reference || {});
       renderRubricHeatmap(data.charts?.rubric_heatmap || {});
       renderBarChart("dashboard-candidate-ranking", data.charts?.candidate_ranking || [], {scaleMax: 5});
       renderBarChart("dashboard-score-distribution", data.charts?.score_distribution || [], {scaleMax: 1, showPercent: true, colorByLabel: true});
@@ -1461,6 +1474,108 @@ _INDEX_HTML = """
       const hue = 8 + ratio * 136;
       const lightness = 88 - ratio * 25;
       return `hsl(${hue}, 62%, ${lightness}%)`;
+    }
+
+    function renderReferenceScatter(series, spearman) {
+      const root = document.getElementById("dashboard-reference-scatter");
+      root.textContent = "";
+      const points = series.points || [];
+      if (!points.length) {
+        const empty = document.createElement("div");
+        empty.className = "muted carousel-empty";
+        empty.textContent = "Sem pares referencia x juiz para o filtro atual.";
+        root.appendChild(empty);
+        return;
+      }
+      const width = 760;
+      const height = 430;
+      const margin = {top: 46, right: 24, bottom: 58, left: 68};
+      const plotWidth = width - margin.left - margin.right;
+      const plotHeight = height - margin.top - margin.bottom;
+      const minScore = 1;
+      const maxScore = 5;
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+      svg.setAttribute("role", "img");
+      svg.setAttribute("class", "scatter-svg");
+      svg.setAttribute("aria-label", "Scatter plot de nota de referencia no eixo X e nota do juiz no eixo Y");
+
+      const stat = document.createElementNS(svg.namespaceURI, "text");
+      stat.setAttribute("x", String(margin.left));
+      stat.setAttribute("y", "25");
+      stat.setAttribute("class", "scatter-stat");
+      stat.textContent = `rho Spearman = ${formatSpearmanValue(spearman.value)} | p-value = ${formatPValue(spearman.p_value)} | n = ${display(spearman.sample_size ?? points.length)}`;
+      svg.appendChild(stat);
+
+      for (let score = minScore; score <= maxScore; score += 1) {
+        const x = scaleScore(score, minScore, maxScore, margin.left, plotWidth);
+        const y = scaleScore(score, minScore, maxScore, margin.top + plotHeight, -plotHeight);
+        svg.appendChild(svgLine(x, margin.top, x, margin.top + plotHeight, "scatter-grid"));
+        svg.appendChild(svgLine(margin.left, y, margin.left + plotWidth, y, "scatter-grid"));
+        svg.appendChild(svgText(x, margin.top + plotHeight + 24, String(score), "scatter-label", "middle"));
+        svg.appendChild(svgText(margin.left - 18, y + 4, String(score), "scatter-label", "end"));
+      }
+      svg.appendChild(svgLine(margin.left, margin.top + plotHeight, margin.left + plotWidth, margin.top + plotHeight, "scatter-axis"));
+      svg.appendChild(svgLine(margin.left, margin.top, margin.left, margin.top + plotHeight, "scatter-axis"));
+
+      for (const point of points) {
+        const seed = Number(point.evaluation_id || point.answer_id || 0);
+        const jitterX = deterministicJitter(seed, 13);
+        const jitterY = deterministicJitter(seed * 7, 13);
+        const circle = document.createElementNS(svg.namespaceURI, "circle");
+        circle.setAttribute("cx", String(scaleScore(point.reference_score, minScore, maxScore, margin.left, plotWidth) + jitterX));
+        circle.setAttribute("cy", String(scaleScore(point.judge_score, minScore, maxScore, margin.top + plotHeight, -plotHeight) + jitterY));
+        circle.setAttribute("r", "5.5");
+        circle.setAttribute("class", "scatter-point");
+        const title = document.createElementNS(svg.namespaceURI, "title");
+        title.textContent = `resposta ${point.answer_id}: referencia ${point.reference_score}, juiz ${point.judge_score}`;
+        circle.appendChild(title);
+        svg.appendChild(circle);
+      }
+      svg.appendChild(svgText(margin.left + plotWidth / 2, height - 16, series.x_label || "referencia", "scatter-label", "middle"));
+      const yLabel = svgText(18, margin.top + plotHeight / 2, series.y_label || "nota do juiz", "scatter-label", "middle");
+      yLabel.setAttribute("transform", `rotate(-90 18 ${margin.top + plotHeight / 2})`);
+      svg.appendChild(yLabel);
+      root.appendChild(svg);
+    }
+
+    function scaleScore(value, minScore, maxScore, origin, span) {
+      return origin + ((Number(value) - minScore) / (maxScore - minScore)) * span;
+    }
+
+    function deterministicJitter(seed, amplitude) {
+      const value = Math.sin(seed * 12.9898) * 43758.5453;
+      return (value - Math.floor(value) - 0.5) * amplitude;
+    }
+
+    function svgLine(x1, y1, x2, y2, className) {
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      line.setAttribute("x1", String(x1));
+      line.setAttribute("y1", String(y1));
+      line.setAttribute("x2", String(x2));
+      line.setAttribute("y2", String(y2));
+      line.setAttribute("class", className);
+      return line;
+    }
+
+    function svgText(x, y, text, className, anchor) {
+      const node = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      node.setAttribute("x", String(x));
+      node.setAttribute("y", String(y));
+      node.setAttribute("class", className);
+      node.setAttribute("text-anchor", anchor);
+      node.textContent = text;
+      return node;
+    }
+
+    function formatSpearmanValue(value) {
+      return value == null ? "-" : Number(value).toFixed(2);
+    }
+
+    function formatPValue(value) {
+      if (value == null) return "-";
+      const number = Number(value);
+      return number < 0.001 ? "<0.001" : number.toFixed(3);
     }
 
     let dashboardCarouselIndex = 0;

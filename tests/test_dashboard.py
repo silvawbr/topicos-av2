@@ -55,7 +55,50 @@ def test_dashboard_calculates_j2_primary_spearman_from_answer_key() -> None:
     spearman_card = payload["cards"]["spearman_reference"]
     assert spearman_card["available"] is True
     assert spearman_card["value"] == 1.0
+    assert spearman_card["p_value"] == 0.0
     assert payload["cards"]["coverage"] == {"evaluated": 4, "expected": 4, "percent": 100.0}
+    assert payload["charts"]["reference_alignment"]["points"] == [
+        {
+            "evaluation_id": 1,
+            "answer_id": 1,
+            "question_id": 101,
+            "dataset": "J2",
+            "candidate_model": "modelo-a",
+            "judge_model": "juiz-a",
+            "reference_score": 5.0,
+            "judge_score": 5,
+        },
+        {
+            "evaluation_id": 2,
+            "answer_id": 2,
+            "question_id": 102,
+            "dataset": "J2",
+            "candidate_model": "modelo-a",
+            "judge_model": "juiz-a",
+            "reference_score": 1.0,
+            "judge_score": 1,
+        },
+        {
+            "evaluation_id": 3,
+            "answer_id": 3,
+            "question_id": 103,
+            "dataset": "J2",
+            "candidate_model": "modelo-a",
+            "judge_model": "juiz-a",
+            "reference_score": 5.0,
+            "judge_score": 5,
+        },
+        {
+            "evaluation_id": 4,
+            "answer_id": 4,
+            "question_id": 104,
+            "dataset": "J2",
+            "candidate_model": "modelo-a",
+            "judge_model": "juiz-a",
+            "reference_score": 1.0,
+            "judge_score": 1,
+        },
+    ]
 
 
 def test_dashboard_marks_j1_primary_spearman_unavailable_without_reference_score() -> None:
@@ -69,6 +112,7 @@ def test_dashboard_marks_j1_primary_spearman_unavailable_without_reference_score
     spearman_card = payload["cards"]["spearman_reference"]
     assert spearman_card["available"] is False
     assert spearman_card["value"] is None
+    assert spearman_card["p_value"] is None
     assert "J1" in spearman_card["note"]
 
 

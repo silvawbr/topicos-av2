@@ -169,12 +169,14 @@ class FakeDashboardService:
                 "average_score": 4.25,
                 "spearman_reference": {
                     "value": None,
+                    "p_value": None,
                     "sample_size": 0,
                     "available": False,
                     "note": "J1 não possui nota humana/rubrica ordinal persistida.",
                 },
                 "judge_arbiter_consistency": {
                     "value": 1.0,
+                    "p_value": 0.0,
                     "sample_size": 2,
                     "available": True,
                     "note": "Meta-avaliação complementar.",
@@ -189,6 +191,22 @@ class FakeDashboardService:
                     {"label": "modelo-candidato", "total": 4, "average": 4.25, "scores": {"1": 1, "2": 0, "3": 0, "4": 0, "5": 3}}
                 ],
                 "judge_average": [{"label": "openai/gpt-oss-120b", "value": 4.25}],
+                "reference_alignment": {
+                    "x_label": "nota humana / score derivado do gabarito",
+                    "y_label": "nota do juiz",
+                    "points": [
+                        {
+                            "evaluation_id": 1,
+                            "answer_id": 10,
+                            "question_id": 20,
+                            "dataset": "J2",
+                            "candidate_model": "modelo-candidato",
+                            "judge_model": "openai/gpt-oss-120b",
+                            "reference_score": 5,
+                            "judge_score": 5,
+                        }
+                    ],
+                },
                 "divergences": [{"label": "modelo-candidato", "value": 1}],
                 "critical_cases": [{"label": "nota 1", "value": 1}],
                 "rubric_heatmap": {
@@ -291,15 +309,22 @@ def test_web_index_contains_progress_element() -> None:
     assert 'data-carousel-index="0"' in response.text
     assert 'data-carousel-index="1"' in response.text
     assert 'data-carousel-index="2"' in response.text
+    assert 'data-carousel-index="3"' in response.text
+    assert "Correlacao juiz x referencia humana/gabarito" in response.text
+    assert 'id="dashboard-reference-scatter"' in response.text
     assert "Heatmap modelo x dimensao da rubrica" in response.text
     assert 'id="dashboard-rubric-heatmap"' in response.text
     assert "function renderModelDistributionChart" in response.text
+    assert "function renderReferenceScatter" in response.text
+    assert "rho Spearman" in response.text
+    assert "p-value" in response.text
     assert "function renderRubricHeatmap" in response.text
     assert "function moveCarousel" in response.text
     assert "function goToCarouselPage" in response.text
     assert "(dashboardCarouselIndex + delta + cards.length) % cards.length" in response.text
     assert "track.style.transform" in response.text
     assert "score_distribution_by_model" in response.text
+    assert "reference_alignment" in response.text
     assert "rubric_heatmap" in response.text
     assert "function buildPostRunStats" in response.text
     assert "function renderPostRunPanel" in response.text
