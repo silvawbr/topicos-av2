@@ -191,6 +191,10 @@ class FakeDashboardService:
                 "judge_average": [{"label": "openai/gpt-oss-120b", "value": 4.25}],
                 "divergences": [{"label": "modelo-candidato", "value": 1}],
                 "critical_cases": [{"label": "nota 1", "value": 1}],
+                "rubric_heatmap": {
+                    "columns": ["Argumentação", "Precisão", "Coesão legal", "Total"],
+                    "rows": [{"label": "modelo-candidato", "values": [4.4, 4.1, 4.2, 4.25], "count": 4}],
+                },
             },
             "tables": {
                 "critical_cases": [
@@ -286,12 +290,17 @@ def test_web_index_contains_progress_element() -> None:
     assert "Indicadores gerais" in response.text
     assert 'data-carousel-index="0"' in response.text
     assert 'data-carousel-index="1"' in response.text
+    assert 'data-carousel-index="2"' in response.text
+    assert "Heatmap modelo x dimensao da rubrica" in response.text
+    assert 'id="dashboard-rubric-heatmap"' in response.text
     assert "function renderModelDistributionChart" in response.text
+    assert "function renderRubricHeatmap" in response.text
     assert "function moveCarousel" in response.text
     assert "function goToCarouselPage" in response.text
     assert "(dashboardCarouselIndex + delta + cards.length) % cards.length" in response.text
     assert "track.style.transform" in response.text
     assert "score_distribution_by_model" in response.text
+    assert "rubric_heatmap" in response.text
     assert "function buildPostRunStats" in response.text
     assert "function renderPostRunPanel" in response.text
     assert "showPercent: true" in response.text

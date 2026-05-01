@@ -120,6 +120,7 @@ def build_dashboard_payload(
             "judge_average": _average_by(scored_rows, "judge_model"),
             "divergences": _divergence_chart(divergence_cases),
             "critical_cases": _critical_chart(critical_cases),
+            "rubric_heatmap": _rubric_heatmap(scored_rows),
         },
         "tables": {
             "critical_cases": critical_cases[:25],
@@ -380,6 +381,58 @@ def _score_distribution_by_model(rows: list[dict[str, Any]]) -> list[dict[str, A
             }
         )
     return sorted(result, key=lambda row: (-row["average"], row["label"]))
+
+
+def _rubric_heatmap(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    dimensions = (
+        ("Argumentação", "argumentacao_score"),
+        ("Precisão", "precisao_score"),
+        ("Coesão legal", "coesao_legal_score"),
+        ("Total", "total_score"),
+    )
+    grouped: dict[str, dict[str, list[float]]] = defaultdict(lambda: {key: [] for _, key in dimensions})
+    for row in rows:
+        label = str(row.get("candidate_model") or "sem valor")
+        for _, key in dimensions:
+            value = _dimension_score(row, key)
+            if value is not None:
+                grouped[label][key].append(value)
+
+    heatmap_rows = []
+    for label, scores_by_dimension in grouped.items():
+        values = [
+            round(statistics.mean(values), 2) if values else None
+            for _, key in dimensions
+            for values in [scores_by_dimension[key]]
+        ]
+        heatmap_rows.append(
+            {
+                "label": label,
+                "values": values,
+                "count": max((len(values) for values in scores_by_dimension.values()), default=0),
+            }
+        )
+    return {
+        "columns": [label for label, _ in dimensions],
+        "rows": sorted(heatmap_rows, key=lambda row: (-(row["values"][-1] or 0), row["label"])),
+    }
+
+
+def _dimension_score(row: dict[str, Any], key: str) -> float | None:
+    value = row.get(key)
+    if value is None and key == "total_score":
+        value = row.get("score")
+    if value is None:
+        criteria = row.get("criteria") if isinstance(row.get("criteria"), dict) else {}
+        value = criteria.get(key)
+    if value is None:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        value = metadata.get(key)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if 1 <= number <= 5 else None
 
 
 def _average_by(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:

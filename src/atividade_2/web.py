@@ -755,6 +755,12 @@ _INDEX_HTML = """
     .score-swatch { width:8px; height:8px; border-radius:999px; flex:0 0 auto; }
     .score-chip strong { color:var(--ink); font-variant-numeric:tabular-nums; }
     .carousel-empty { width:100%; }
+    .heatmap-wrap { width:100%; overflow:auto; border:1px solid var(--line); border-radius:8px; }
+    .heatmap-grid { display:grid; min-width:620px; font-size:12px; }
+    .heatmap-cell { min-height:42px; display:flex; align-items:center; justify-content:center; padding:8px; border-right:1px solid rgba(255,255,255,.42); border-bottom:1px solid rgba(255,255,255,.42); font-variant-numeric:tabular-nums; }
+    .heatmap-head { background:#eef3f8; color:var(--ink); font-weight:750; border-color:var(--line); }
+    .heatmap-model { justify-content:flex-start; background:#f8fafc; color:var(--ink); font-weight:750; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .heatmap-value { color:#111827; font-weight:750; }
     .bar-row { display:grid; grid-template-columns:minmax(82px,132px) minmax(88px,1fr) 104px; gap:8px; align-items:center; margin:7px 0; font-size:12px; }
     .bar-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
     .bar-track { height:14px; border-radius:999px; background:#e5e9f0; overflow:hidden; box-shadow:inset 0 0 0 1px rgba(24,33,47,.03); }
@@ -858,6 +864,7 @@ _INDEX_HTML = """
           <div id="dashboard-model-carousel-dots" class="carousel-tabs" role="tablist" aria-label="Paginas do dashboard">
             <button class="carousel-tab active" type="button" data-carousel-index="0" role="tab" aria-selected="true">Indicadores gerais</button>
             <button class="carousel-tab" type="button" data-carousel-index="1" role="tab" aria-selected="false">Distribuicao das notas por modelo</button>
+            <button class="carousel-tab" type="button" data-carousel-index="2" role="tab" aria-selected="false">Heatmap rubrica</button>
           </div>
           <div class="carousel-controls" aria-label="Navegacao do carousel">
             <button id="dashboard-model-carousel-prev" class="carousel-button" type="button" aria-label="Pagina anterior">&lsaquo;</button>
@@ -896,6 +903,10 @@ _INDEX_HTML = """
             <div class="dashboard-carousel-slide">
               <h3>Distribuicao das notas por modelo</h3>
               <div id="dashboard-model-distribution-chart" class="model-distribution-list"></div>
+            </div>
+            <div class="dashboard-carousel-slide">
+              <h3>Heatmap modelo x dimensao da rubrica</h3>
+              <div id="dashboard-rubric-heatmap" class="heatmap-wrap"></div>
             </div>
           </div>
         </div>
@@ -1282,6 +1293,7 @@ _INDEX_HTML = """
       populateSelect("dashboard_judge_model", data.options?.judge_models || [], selectedValues("dashboard_judge_model"));
       renderDashboardCards(data.cards || {});
       renderModelDistributionChart(data.charts?.score_distribution_by_model || []);
+      renderRubricHeatmap(data.charts?.rubric_heatmap || {});
       renderBarChart("dashboard-candidate-ranking", data.charts?.candidate_ranking || [], {scaleMax: 5});
       renderBarChart("dashboard-score-distribution", data.charts?.score_distribution || [], {scaleMax: 1, showPercent: true, colorByLabel: true});
       renderBarChart("dashboard-judge-average", data.charts?.judge_average || [], {scaleMax: 5});
@@ -1404,6 +1416,51 @@ _INDEX_HTML = """
         legend.appendChild(chip);
       }
       return legend;
+    }
+
+    function renderRubricHeatmap(heatmap) {
+      const root = document.getElementById("dashboard-rubric-heatmap");
+      root.textContent = "";
+      const columns = heatmap.columns || [];
+      const rows = heatmap.rows || [];
+      if (!columns.length || !rows.length) {
+        const empty = document.createElement("div");
+        empty.className = "muted carousel-empty";
+        empty.textContent = "Sem scores dimensionais para o filtro atual.";
+        root.appendChild(empty);
+        return;
+      }
+      const grid = document.createElement("div");
+      grid.className = "heatmap-grid";
+      grid.style.gridTemplateColumns = `minmax(160px, 1.4fr) repeat(${columns.length}, minmax(112px, 1fr))`;
+      grid.appendChild(heatmapCell("Modelo", "heatmap-head"));
+      columns.forEach((column) => grid.appendChild(heatmapCell(column, "heatmap-head")));
+      rows.forEach((row) => {
+        grid.appendChild(heatmapCell(row.label, "heatmap-model"));
+        (row.values || []).forEach((value) => {
+          const cell = heatmapCell(value == null ? "-" : formatAverage(value), "heatmap-value");
+          cell.style.background = heatmapColor(value);
+          cell.title = `${row.label} - n=${display(row.count)}`;
+          grid.appendChild(cell);
+        });
+      });
+      root.appendChild(grid);
+    }
+
+    function heatmapCell(text, className) {
+      const cell = document.createElement("div");
+      cell.className = `heatmap-cell ${className}`;
+      cell.textContent = text;
+      return cell;
+    }
+
+    function heatmapColor(value) {
+      if (value == null) return "#eef2f7";
+      const score = Math.max(1, Math.min(5, Number(value)));
+      const ratio = (score - 1) / 4;
+      const hue = 8 + ratio * 136;
+      const lightness = 88 - ratio * 25;
+      return `hsl(${hue}, 62%, ${lightness}%)`;
     }
 
     let dashboardCarouselIndex = 0;

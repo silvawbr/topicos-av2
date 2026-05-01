@@ -122,3 +122,39 @@ def test_dashboard_reports_score_distribution_by_candidate_model() -> None:
         {"label": "modelo-a", "total": 3, "average": 3.33, "scores": {"1": 1, "2": 0, "3": 0, "4": 1, "5": 1}},
         {"label": "modelo-b", "total": 2, "average": 3, "scores": {"1": 0, "2": 0, "3": 2, "4": 0, "5": 0}},
     ]
+
+
+def test_dashboard_reports_rubric_dimension_heatmap_by_candidate_model() -> None:
+    rows = [
+        {
+            **_row(evaluation_id=1, answer_id=1, dataset="J1", candidate_answer="texto", reference_answer="rubrica", score=5, candidate_model="modelo-a"),
+            "argumentacao_score": 4.5,
+            "precisao_score": 4,
+            "coesao_legal_score": 5,
+            "total_score": 4.5,
+        },
+        {
+            **_row(evaluation_id=2, answer_id=2, dataset="J1", candidate_answer="texto", reference_answer="rubrica", score=4, candidate_model="modelo-a"),
+            "argumentacao_score": 3.5,
+            "precisao_score": 4,
+            "coesao_legal_score": 4,
+            "total_score": 4,
+        },
+        {
+            **_row(evaluation_id=3, answer_id=3, dataset="J1", candidate_answer="texto", reference_answer="rubrica", score=2, candidate_model="modelo-b"),
+            "argumentacao_score": 2,
+            "precisao_score": 2.5,
+            "coesao_legal_score": 3,
+            "total_score": 2.5,
+        },
+    ]
+
+    payload = build_dashboard_payload(rows, expected_answers=3, filters=DashboardFilters(dataset="J1"))
+
+    assert payload["charts"]["rubric_heatmap"] == {
+        "columns": ["Argumentação", "Precisão", "Coesão legal", "Total"],
+        "rows": [
+            {"label": "modelo-a", "values": [4.0, 4.0, 4.5, 4.25], "count": 2},
+            {"label": "modelo-b", "values": [2.0, 2.5, 3.0, 2.5], "count": 1},
+        ],
+    }
