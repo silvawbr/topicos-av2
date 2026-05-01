@@ -230,6 +230,15 @@ class FakeDashboardService:
                 },
                 "divergences": [{"label": "modelo-candidato", "value": 1}],
                 "critical_cases": [{"label": "nota 1", "value": 1}],
+                "critical_error_categories": [
+                    {"label": "Nota alta para resposta errada", "value": 1},
+                    {"label": "Nota baixa para resposta correta", "value": 0},
+                    {"label": "Alucinacao normativa", "value": 1},
+                    {"label": "Resposta sem fundamentacao", "value": 0},
+                    {"label": "Divergencia entre juizes", "value": 1},
+                    {"label": "Erro de parsing", "value": 0},
+                    {"label": "Timeout/HTTP error", "value": 0},
+                ],
                 "rubric_heatmap": {
                     "columns": ["Argumentação", "Precisão", "Coesão legal", "Total"],
                     "rows": [{"label": "modelo-candidato", "values": [4.4, 4.1, 4.2, 4.25], "count": 4}],
@@ -250,6 +259,17 @@ class FakeDashboardService:
                     }
                 ],
                 "divergence_cases": [],
+                "critical_error_analysis": [
+                    {
+                        "question_id": 20,
+                        "candidate_model": "modelo-candidato",
+                        "judge_model": "openai/gpt-oss-120b",
+                        "score": 5,
+                        "error_type": "Nota alta para resposta errada",
+                        "short_justification": "referencia 1, juiz 5",
+                        "log_url": "/api/run-history/test/audit-log",
+                    }
+                ],
             },
             "methodology": {"primary_spearman": "metodologia principal", "judge_arbiter": "consistencia"},
         }
@@ -327,23 +347,32 @@ def test_web_index_contains_progress_element() -> None:
     assert 'id="dashboard-model-distribution-carousel"' in response.text
     assert 'id="dashboard-model-distribution-chart"' in response.text
     assert "Indicadores gerais" in response.text
+    assert response.text.index("Casos criticos e divergencias") < response.text.index('<h3>Distribuicao das notas por modelo</h3>')
+    assert 'id="dashboard-cases-body"' in response.text
     assert 'data-carousel-index="0"' in response.text
     assert 'data-carousel-index="1"' in response.text
     assert 'data-carousel-index="2"' in response.text
     assert 'data-carousel-index="3"' in response.text
     assert 'data-carousel-index="4"' in response.text
+    assert 'data-carousel-index="5"' in response.text
     assert "Correlacao juiz x referencia humana/gabarito" in response.text
     assert 'id="dashboard-reference-scatter"' in response.text
     assert "Matriz de concordancia / divergencia" in response.text
     assert 'id="dashboard-ordinal-confusion"' in response.text
     assert "Heatmap modelo x dimensao da rubrica" in response.text
     assert 'id="dashboard-rubric-heatmap"' in response.text
+    assert "Analise de erros criticos" in response.text
+    assert "Categorias de erro" in response.text
+    assert 'id="dashboard-critical-error-chart"' in response.text
+    assert 'id="dashboard-critical-error-body"' in response.text
+    assert "Link para log" in response.text
     assert "function renderModelDistributionChart" in response.text
     assert "function renderReferenceScatter" in response.text
     assert "function renderOrdinalConfusion" in response.text
     assert "rho Spearman" in response.text
     assert "p-value" in response.text
     assert "function renderRubricHeatmap" in response.text
+    assert "function renderCriticalErrorAnalysis" in response.text
     assert "function moveCarousel" in response.text
     assert "function goToCarouselPage" in response.text
     assert "(dashboardCarouselIndex + delta + cards.length) % cards.length" in response.text
@@ -352,6 +381,8 @@ def test_web_index_contains_progress_element() -> None:
     assert "reference_alignment" in response.text
     assert "ordinal_confusion" in response.text
     assert "rubric_heatmap" in response.text
+    assert "critical_error_categories" in response.text
+    assert "critical_error_analysis" in response.text
     assert "function buildPostRunStats" in response.text
     assert "function renderPostRunPanel" in response.text
     assert "showPercent: true" in response.text

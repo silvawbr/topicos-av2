@@ -95,6 +95,7 @@ def build_dashboard_payload(
     critical_cases = _critical_cases(rows)
     divergence_cases = _divergence_cases(successful_rows)
     ordinal_confusion = _ordinal_confusion_matrix(scored_rows, filters.dataset)
+    critical_error_analysis = _critical_error_analysis(rows, divergence_cases, filters.dataset)
 
     cards = {
         "evaluations": total_evaluations,
@@ -123,11 +124,13 @@ def build_dashboard_payload(
             "ordinal_confusion": ordinal_confusion,
             "divergences": _divergence_chart(divergence_cases),
             "critical_cases": _critical_chart(critical_cases),
+            "critical_error_categories": critical_error_analysis["categories"],
             "rubric_heatmap": _rubric_heatmap(scored_rows),
         },
         "tables": {
             "critical_cases": critical_cases[:25],
             "divergence_cases": divergence_cases[:25],
+            "critical_error_analysis": critical_error_analysis["cases"][:40],
         },
         "methodology": {
             "primary_spearman": (
@@ -180,6 +183,7 @@ def _fetch_evaluation_rows(cursor: Any, filters: DashboardFilters) -> list[dict[
             COALESCE(a.status_avaliacao, 'success') AS status,
             a.nota_atribuida,
             a.data_avaliacao,
+            a.chain_of_thought,
             r.texto_resposta,
             p.resposta_ouro,
             COALESCE(p.metadados, '{{}}'::jsonb),
@@ -208,10 +212,11 @@ def _fetch_evaluation_rows(cursor: Any, filters: DashboardFilters) -> list[dict[
             "status": row[7],
             "score": int(row[8]) if row[8] is not None else None,
             "evaluated_at": row[9].isoformat() if row[9] is not None else None,
-            "candidate_answer": row[10],
-            "reference_answer": row[11],
-            "metadata": row[12] if isinstance(row[12], dict) else {},
-            "trigger_reason": row[13],
+            "rationale": row[10],
+            "candidate_answer": row[11],
+            "reference_answer": row[12],
+            "metadata": row[13] if isinstance(row[13], dict) else {},
+            "trigger_reason": row[14],
         }
         for row in cursor.fetchall()
     ]
@@ -621,6 +626,114 @@ def _critical_chart(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for case in cases:
         counts[case["reason"]] += 1
     return sorted([{"label": label, "value": value} for label, value in counts.items()], key=lambda row: (-row["value"], row["label"]))
+
+
+def _critical_error_analysis(
+    rows: list[dict[str, Any]],
+    divergence_cases: list[dict[str, Any]],
+    selected_dataset: str,
+) -> dict[str, list[dict[str, Any]]]:
+    category_order = [
+        "Nota alta para resposta errada",
+        "Nota baixa para resposta correta",
+        "Alucinacao normativa",
+        "Resposta sem fundamentacao",
+        "Divergencia entre juizes",
+        "Erro de parsing",
+        "Timeout/HTTP error",
+    ]
+    cases: list[dict[str, Any]] = []
+    seen: set[tuple[int | None, str, str]] = set()
+
+    def add_case(row: dict[str, Any], error_type: str, justification: str) -> None:
+        key = (row.get("evaluation_id"), error_type, row.get("judge_model") or "")
+        if key in seen:
+            return
+        seen.add(key)
+        cases.append(_critical_error_case(row, error_type, justification))
+
+    for row in rows:
+        reference_score = _ordinal_score(_reference_score(row, selected_dataset))
+        judge_score = _ordinal_score(row.get("score"))
+        if judge_score is not None and reference_score is not None:
+            if judge_score >= 4 and reference_score <= 2:
+                add_case(row, "Nota alta para resposta errada", f"referencia {reference_score}, juiz {judge_score}")
+            if judge_score <= 2 and reference_score >= 4:
+                add_case(row, "Nota baixa para resposta correta", f"referencia {reference_score}, juiz {judge_score}")
+        if _has_normative_hallucination(row):
+            add_case(row, "Alucinacao normativa", _short_justification(row, "indicio de norma inexistente ou fabricada"))
+        if _is_success(row) and row.get("score") is not None and not _has_legal_grounding(row):
+            add_case(row, "Resposta sem fundamentacao", _short_justification(row, "sem citacao legal identificavel"))
+        if row.get("score") is None:
+            add_case(row, "Erro de parsing", _short_justification(row, "nota nao extraivel"))
+        if _is_timeout_or_http_error(row):
+            add_case(row, "Timeout/HTTP error", _short_justification(row, str(row.get("status") or "falha operacional")))
+
+    rows_by_answer = {row.get("answer_id"): row for row in rows}
+    for divergence in divergence_cases:
+        base = rows_by_answer.get(divergence.get("answer_id"), divergence)
+        add_case(base, "Divergencia entre juizes", str(divergence.get("scores") or divergence.get("reason") or "delta >= 2"))
+
+    counts = {label: 0 for label in category_order}
+    for case in cases:
+        counts[case["error_type"]] = counts.get(case["error_type"], 0) + 1
+    categories = [{"label": label, "value": counts[label]} for label in category_order]
+    return {
+        "categories": categories,
+        "cases": sorted(cases, key=lambda row: (-counts.get(row["error_type"], 0), row["error_type"], row["question_id"], row["candidate_model"])),
+    }
+
+
+def _critical_error_case(row: dict[str, Any], error_type: str, justification: str) -> dict[str, Any]:
+    return {
+        "question_id": row.get("question_id"),
+        "candidate_model": row.get("candidate_model"),
+        "judge_model": row.get("judge_model"),
+        "score": row.get("score"),
+        "error_type": error_type,
+        "short_justification": justification,
+        "log_url": _log_url(row),
+    }
+
+
+def _has_normative_hallucination(row: dict[str, Any]) -> bool:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    for key in ("normative_hallucination", "hallucinated_norm", "invalid_legal_citation", "lei_inexistente"):
+        if metadata.get(key) is True:
+            return True
+    text = f"{row.get('rationale') or ''} {row.get('trigger_reason') or ''}".lower()
+    markers = ("lei inexistente", "artigo inexistente", "norma inexistente", "fundamento inexistente", "citação inexistente", "citacao inexistente", "alucina", "fabricad")
+    return any(marker in text for marker in markers)
+
+
+def _has_legal_grounding(row: dict[str, Any]) -> bool:
+    text = str(row.get("rationale") or "")
+    if not text.strip():
+        return False
+    legal_markers = ("art.", "artigo", "lei", "codigo", "código", "constituição", "constituicao", "cf", "cpp", "cpc", "cp", "clt", "sumula", "súmula")
+    return any(marker in text.lower() for marker in legal_markers)
+
+
+def _is_timeout_or_http_error(row: dict[str, Any]) -> bool:
+    text = f"{row.get('status') or ''} {row.get('rationale') or ''} {row.get('trigger_reason') or ''}".lower()
+    return "timeout" in text or "http" in text or "connection" in text
+
+
+def _short_justification(row: dict[str, Any], fallback: str) -> str:
+    text = str(row.get("rationale") or row.get("trigger_reason") or "").strip()
+    if not text:
+        return fallback
+    collapsed = " ".join(text.split())
+    return collapsed[:117] + "..." if len(collapsed) > 120 else collapsed
+
+
+def _log_url(row: dict[str, Any]) -> str | None:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    for key in ("log_url", "audit_log_url"):
+        value = metadata.get(key) or row.get(key)
+        if value:
+            return str(value)
+    return None
 
 
 def _case_row(row: dict[str, Any], *, reason: str) -> dict[str, Any]:

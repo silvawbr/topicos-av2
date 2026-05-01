@@ -766,6 +766,8 @@ _INDEX_HTML = """
     .confusion-card { border:1px solid var(--line); border-radius:8px; padding:10px; background:#fbfcfe; }
     .confusion-card strong { display:block; font-size:13px; margin-bottom:4px; }
     .confusion-card span { color:var(--muted); font-size:12px; }
+    .critical-error-table table { min-width:1120px; }
+    .critical-error-table a { color:var(--accent); font-weight:650; text-decoration:none; }
     .scatter-wrap { width:100%; overflow:auto; border:1px solid var(--line); border-radius:8px; background:#fbfcfe; }
     .scatter-svg { display:block; width:100%; min-width:680px; height:auto; }
     .scatter-axis { stroke:#9aa7b7; stroke-width:1; }
@@ -879,6 +881,7 @@ _INDEX_HTML = """
             <button class="carousel-tab" type="button" data-carousel-index="2" role="tab" aria-selected="false">Juiz x referencia</button>
             <button class="carousel-tab" type="button" data-carousel-index="3" role="tab" aria-selected="false">Matriz concordancia</button>
             <button class="carousel-tab" type="button" data-carousel-index="4" role="tab" aria-selected="false">Heatmap rubrica</button>
+            <button class="carousel-tab" type="button" data-carousel-index="5" role="tab" aria-selected="false">Erros criticos</button>
           </div>
           <div class="carousel-controls" aria-label="Navegacao do carousel">
             <button id="dashboard-model-carousel-prev" class="carousel-button" type="button" aria-label="Pagina anterior">&lsaquo;</button>
@@ -913,6 +916,27 @@ _INDEX_HTML = """
                 </div>
               </div>
               <p id="dashboard-methodology" class="dashboard-note"></p>
+              <h3 style="margin-top:18px">Casos criticos e divergencias</h3>
+              <div class="table-wrap dashboard-table">
+                <table aria-label="Casos criticos do dashboard">
+                  <thead>
+                    <tr>
+                      <th>motivo</th>
+                      <th>dataset</th>
+                      <th>id_resposta</th>
+                      <th>id_pergunta</th>
+                      <th>modelo_candidato</th>
+                      <th>juiz</th>
+                      <th>papel</th>
+                      <th>nota</th>
+                      <th>status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="dashboard-cases-body">
+                    <tr><td colspan="9" class="muted">Carregando dashboard.</td></tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
             <div class="dashboard-carousel-slide">
               <h3>Distribuicao das notas por modelo</h3>
@@ -930,29 +954,33 @@ _INDEX_HTML = """
               <h3>Heatmap modelo x dimensao da rubrica</h3>
               <div id="dashboard-rubric-heatmap" class="heatmap-wrap"></div>
             </div>
+            <div class="dashboard-carousel-slide">
+              <h3>Analise de erros criticos</h3>
+              <div class="chart">
+                <h3>Categorias de erro</h3>
+                <div id="dashboard-critical-error-chart"></div>
+              </div>
+              <div class="table-wrap critical-error-table">
+                <table aria-label="Analise de erros criticos">
+                  <thead>
+                    <tr>
+                      <th>Pergunta</th>
+                      <th>Modelo candidato</th>
+                      <th>Juiz</th>
+                      <th>Nota</th>
+                      <th>Tipo de erro</th>
+                      <th>Justificativa curta</th>
+                      <th>Link para log</th>
+                    </tr>
+                  </thead>
+                  <tbody id="dashboard-critical-error-body">
+                    <tr><td colspan="7" class="muted">Carregando analise.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </div>
-      </div>
-      <h2 style="margin-top:18px">Casos criticos e divergencias</h2>
-      <div class="table-wrap dashboard-table">
-        <table aria-label="Casos criticos do dashboard">
-          <thead>
-            <tr>
-              <th>motivo</th>
-              <th>dataset</th>
-              <th>id_resposta</th>
-              <th>id_pergunta</th>
-              <th>modelo_candidato</th>
-              <th>juiz</th>
-              <th>papel</th>
-              <th>nota</th>
-              <th>status</th>
-            </tr>
-          </thead>
-          <tbody id="dashboard-cases-body">
-            <tr><td colspan="9" class="muted">Carregando dashboard.</td></tr>
-          </tbody>
-        </table>
       </div>
     </section>
   </main>
@@ -1318,6 +1346,7 @@ _INDEX_HTML = """
       renderReferenceScatter(data.charts?.reference_alignment || {}, data.cards?.spearman_reference || {});
       renderOrdinalConfusion(data.charts?.ordinal_confusion || {});
       renderRubricHeatmap(data.charts?.rubric_heatmap || {});
+      renderCriticalErrorAnalysis(data.charts?.critical_error_categories || [], data.tables?.critical_error_analysis || []);
       renderBarChart("dashboard-candidate-ranking", data.charts?.candidate_ranking || [], {scaleMax: 5});
       renderBarChart("dashboard-score-distribution", data.charts?.score_distribution || [], {scaleMax: 1, showPercent: true, colorByLabel: true});
       renderBarChart("dashboard-judge-average", data.charts?.judge_average || [], {scaleMax: 5});
@@ -1608,6 +1637,46 @@ _INDEX_HTML = """
       yLabel.setAttribute("transform", `rotate(-90 18 ${margin.top + plotHeight / 2})`);
       svg.appendChild(yLabel);
       root.appendChild(svg);
+    }
+
+    function renderCriticalErrorAnalysis(categories, cases) {
+      renderBarChart("dashboard-critical-error-chart", categories || [], {scaleMax: 1, showPercent: true, tone: "bad"});
+      const body = document.getElementById("dashboard-critical-error-body");
+      body.textContent = "";
+      if (!cases.length) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 7;
+        cell.className = "muted";
+        cell.textContent = "Sem erros criticos detectados no filtro atual.";
+        row.appendChild(cell);
+        body.appendChild(row);
+        return;
+      }
+      cases.slice(0, 40).forEach((item) => {
+        const row = document.createElement("tr");
+        for (const value of [
+          item.question_id,
+          item.candidate_model,
+          item.judge_model,
+          item.score,
+          item.error_type,
+          item.short_justification
+        ]) appendCell(row, display(value));
+        const logCell = document.createElement("td");
+        if (item.log_url) {
+          const link = document.createElement("a");
+          link.href = item.log_url;
+          link.target = "_blank";
+          link.rel = "noopener";
+          link.textContent = "Abrir log";
+          logCell.appendChild(link);
+        } else {
+          logCell.textContent = "-";
+        }
+        row.appendChild(logCell);
+        body.appendChild(row);
+      });
     }
 
     function scaleScore(value, minScore, maxScore, origin, span) {
