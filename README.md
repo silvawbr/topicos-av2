@@ -71,6 +71,20 @@ make db-migrate-or-create
 
 Esse comando usa `backup_atividade_2.sql`. Se o banco já tiver tabelas públicas, o restore é ignorado para evitar sobrescrever dados locais.
 
+Para forçar o restore sobre um banco já populado, limpando o schema `public` antes de restaurar:
+
+```bash
+make db-migrate-or-create FORCE=1
+```
+
+O script também aceita o argumento diretamente:
+
+```bash
+./scripts/db_migrate_or_create.sh --force
+```
+
+`make db-migrate-or-create --force` não é suportado pelo GNU Make local, porque `--force` é interpretado como opção do próprio `make`.
+
 Valide o restore:
 
 ```bash
@@ -459,6 +473,7 @@ make clean
 ```
 
 `make db-reset` remove o volume local do PostgreSQL. Use apenas quando quiser descartar o banco local e restaurar do zero.
+`make db-migrate-or-create FORCE=1` limpa o schema `public` do banco atual e restaura `backup_atividade_2.sql` sem depender de o banco estar vazio.
 
 ## Fluxo Recomendado
 

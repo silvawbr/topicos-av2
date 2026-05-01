@@ -224,6 +224,25 @@ class FakeDumpService:
         )
 
 
+class FakeDatabaseResetService:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.restored_paths = []
+
+    def reset_to_initial_state(self) -> dict:
+        self.calls += 1
+        return {"status": "ok", "message": "Database restored to initial state."}
+
+    def restore_backup(self, backup_file) -> dict:
+        self.restored_paths.append(backup_file)
+        return {
+            "status": "ok",
+            "message": "Backup restored.",
+            "filename": backup_file.name,
+            "path": str(backup_file),
+        }
+
+
 def test_web_index_contains_progress_element() -> None:
     client = TestClient(create_app(FakeRunJudgeService()))
 
@@ -234,7 +253,18 @@ def test_web_index_contains_progress_element() -> None:
     assert '<main id="dashboard-panel" class="dashboard-layout tab-panel">' in response.text
     assert '<main id="execution-panel" class="tab-panel" hidden>' in response.text
     assert "Resultados e Auditoria da Avaliacao" in response.text
-    assert 'id="database-dump" type="button">Exportar dump do banco</button>' in response.text
+    assert 'id="database-actions-toggle" class="database-actions-toggle"' in response.text
+    assert "Acoes do Banco" in response.text
+    assert 'id="database-clean" class="danger" type="button" role="menuitem">Clean DB (Initial State)</button>' in response.text
+    assert 'id="database-restore" type="button" role="menuitem">Restaurar Backup</button>' in response.text
+    assert 'id="database-restore-file" type="file" accept=".sql,application/sql,text/plain" hidden>' in response.text
+    assert 'id="database-dump" type="button" role="menuitem">Exportar Dump do Banco</button>' in response.text
+    assert 'id="database-clean-dialog" class="confirm-dialog"' in response.text
+    assert 'id="database-clean-backup-confirm" class="secondary backup-clean-button" type="button">Fazer backup e limpar</button>' in response.text
+    assert 'id="database-dump-dialog" class="confirm-dialog"' in response.text
+    assert 'id="database-dump-status" class="status"></span>' in response.text
+    assert "Dump completo em outputs/backup." not in response.text
+    assert "confirm(" not in response.text
     assert '<progress id="batch-progress"' in response.text
     assert 'id="eligible-missing"' in response.text
     assert 'id="execution-table-body"' in response.text
@@ -333,6 +363,61 @@ def test_database_dump_endpoint_returns_download_metadata() -> None:
     assert data["filename"] == "atividade_2_20260430_120000.sql"
     assert data["download_url"] == "/api/database-dumps/atividade_2_20260430_120000.sql"
     assert dump_service.calls == 1
+
+
+def test_database_reset_endpoint_requires_csrf_token() -> None:
+    reset_service = FakeDatabaseResetService()
+    client = TestClient(create_app(FakeRunJudgeService(), database_reset_service=reset_service))
+
+    response = client.post("/api/database-reset", json={})
+
+    assert response.status_code == 403
+    assert reset_service.calls == 0
+
+
+def test_database_reset_endpoint_restores_initial_state() -> None:
+    reset_service = FakeDatabaseResetService()
+    client = TestClient(create_app(FakeRunJudgeService(), database_reset_service=reset_service))
+    token = client.get("/api/config").json()["csrf_token"]
+
+    response = client.post("/api/database-reset", headers={"x-csrf-token": token}, json={})
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "message": "Database restored to initial state."}
+    assert reset_service.calls == 1
+
+
+def test_database_restore_endpoint_requires_csrf_token(tmp_path) -> None:
+    reset_service = FakeDatabaseResetService()
+    client = TestClient(create_app(FakeRunJudgeService(), backup_dir=tmp_path, database_reset_service=reset_service))
+
+    response = client.post(
+        "/api/database-restore",
+        headers={"x-backup-filename": "atividade_2_20260430_120000.sql"},
+        content=b"SELECT 1;",
+    )
+
+    assert response.status_code == 403
+    assert reset_service.restored_paths == []
+
+
+def test_database_restore_endpoint_restores_uploaded_sql(tmp_path) -> None:
+    reset_service = FakeDatabaseResetService()
+    client = TestClient(create_app(FakeRunJudgeService(), backup_dir=tmp_path, database_reset_service=reset_service))
+    token = client.get("/api/config").json()["csrf_token"]
+
+    response = client.post(
+        "/api/database-restore",
+        headers={"x-csrf-token": token, "x-backup-filename": "atividade_2_20260430_120000.sql"},
+        content=b"SELECT 1;",
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert data["filename"].endswith("_atividade_2_20260430_120000.sql")
+    assert len(reset_service.restored_paths) == 1
+    assert not reset_service.restored_paths[0].exists()
 
 
 def test_database_dump_download_rejects_path_traversal(tmp_path) -> None:

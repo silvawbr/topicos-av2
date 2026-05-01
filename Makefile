@@ -40,7 +40,7 @@ db-reset:
 	docker compose --env-file .env down -v
 
 db-migrate-or-create:
-	./scripts/db_migrate_or_create.sh
+	./scripts/db_migrate_or_create.sh $(if $(FORCE),--force)
 
 db-restore-validate:
 	./scripts/db_restore_validate.sh
