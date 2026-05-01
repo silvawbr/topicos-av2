@@ -562,6 +562,33 @@ def test_mutating_endpoint_requires_csrf_token() -> None:
     assert response.status_code == 403
 
 
+def test_config_exposes_unique_judge_model_options() -> None:
+    client = TestClient(create_app(FakeRunJudgeService()))
+
+    response = client.get("/api/config")
+
+    assert response.status_code == 200
+    assert response.json()["judge_model_options"] == [
+        "gpt-oss-120b",
+        "llama-3.3-70b-instruct",
+        "m-prometheus-14b",
+    ]
+
+
+def test_execution_form_uses_model_selects_and_mode_blocks() -> None:
+    client = TestClient(create_app(FakeRunJudgeService()))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert '<select id="judge_model"></select>' in response.text
+    assert '<select id="secondary_judge_model"></select>' in response.text
+    assert '<select id="arbiter_judge_model"></select>' in response.text
+    assert 'id="secondary_block" class="judge-block" data-judge-block="secondary"' in response.text
+    assert 'id="arbiter_block" class="judge-block" data-judge-block="arbiter"' in response.text
+    assert "function renderJudgeBlocks()" in response.text
+
+
 def test_dry_run_returns_secret_safe_preview() -> None:
     client = TestClient(create_app(FakeRunJudgeService()))
     token = client.get("/api/config").json()["csrf_token"]

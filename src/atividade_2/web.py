@@ -244,6 +244,13 @@ def create_app(
     @app.get("/api/config")
     def get_config(request: Request) -> dict:
         config = request.app.state.jobs.service.describe_config()
+        defaults = config.get("defaults") or {}
+        configured_models = [
+            defaults.get("judge_model"),
+            defaults.get("secondary_judge_model"),
+            defaults.get("arbiter_judge_model"),
+        ]
+        config["judge_model_options"] = list(dict.fromkeys(model for model in configured_models if model))
         config["csrf_token"] = request.app.state.csrf_token
         return config
 
@@ -1009,9 +1016,9 @@ _INDEX_HTML = """
         <select id="judge_execution_strategy"><option>sequential</option><option>parallel</option></select>
       </label>
       <div class="hint">Sequential e melhor para endpoint local ou fragil. Parallel e indicado para endpoint remoto que aceita concorrencia.</div>
-      <div class="judge-block">
+      <div id="judge_block" class="judge-block" data-judge-block="judge">
       <label>Juiz 1 - modelo
-        <input id="judge_model" autocomplete="off">
+        <select id="judge_model"></select>
       </label>
       <label>Endpoint do juiz 1
         <select id="endpoint_source_judge"><option value="env">Usar .env</option><option value="custom">Config propria</option></select>
@@ -1028,9 +1035,9 @@ _INDEX_HTML = """
       </label>
       </div>
       </div>
-      <div class="judge-block">
+      <div id="secondary_block" class="judge-block" data-judge-block="secondary">
       <label>Juiz 2 - modelo
-        <input id="secondary_judge_model" autocomplete="off">
+        <select id="secondary_judge_model"></select>
       </label>
       <label>Endpoint do juiz 2
         <select id="endpoint_source_secondary"><option value="env">Usar .env</option><option value="judge">Copiar do juiz 1</option><option value="custom">Config propria</option></select>
@@ -1047,9 +1054,9 @@ _INDEX_HTML = """
       </label>
       </div>
       </div>
-      <div class="judge-block">
+      <div id="arbiter_block" class="judge-block" data-judge-block="arbiter">
       <label>Arbitro - modelo
-        <input id="arbiter_judge_model" autocomplete="off">
+        <select id="arbiter_judge_model"></select>
       </label>
       <label>Endpoint do arbitro
         <select id="endpoint_source_arbiter"><option value="env">Usar .env</option><option value="judge">Copiar do juiz 1</option><option value="secondary">Copiar do juiz 2</option><option value="custom">Config propria</option></select>
@@ -1278,6 +1285,7 @@ _INDEX_HTML = """
     let dashboardLoaded = false;
     let currentAuditLogUrl = null;
     let activeRunId = null;
+    let judgeModelOptions = [];
 
     function value(id) { return document.getElementById(id).value; }
     function setText(id, text) { document.getElementById(id).textContent = text ?? "-"; }
@@ -1373,6 +1381,50 @@ _INDEX_HTML = """
         option.selected = selectedSet.has(value);
         select.appendChild(option);
       }
+    }
+
+    function visibleModelSelectIds() {
+      const mode = value("panel_mode");
+      if (mode === "single") return ["judge_model"];
+      if (mode === "primary_only") return ["judge_model", "secondary_judge_model"];
+      return ["judge_model", "secondary_judge_model", "arbiter_judge_model"];
+    }
+
+    function renderJudgeModelSelects() {
+      const visibleIds = new Set(visibleModelSelectIds());
+      const chosenBySelect = {};
+      for (const id of ["judge_model", "secondary_judge_model", "arbiter_judge_model"]) {
+        chosenBySelect[id] = value(id);
+      }
+      for (const id of ["judge_model", "secondary_judge_model", "arbiter_judge_model"]) {
+        const select = document.getElementById(id);
+        const selected = chosenBySelect[id];
+        select.textContent = "";
+        for (const model of judgeModelOptions) {
+          const selectedElsewhere = Object.entries(chosenBySelect).some(([otherId, otherValue]) => (
+            otherId !== id && visibleIds.has(otherId) && otherValue === model
+          ));
+          if (selectedElsewhere) continue;
+          const option = document.createElement("option");
+          option.value = model;
+          option.textContent = model;
+          option.selected = model === selected;
+          select.appendChild(option);
+        }
+        if (selected && Array.from(select.options).some((option) => option.value === selected)) {
+          select.value = selected;
+        } else if (select.options.length) {
+          select.selectedIndex = 0;
+        }
+      }
+    }
+
+    function renderJudgeBlocks() {
+      const mode = value("panel_mode");
+      document.getElementById("judge_block").hidden = false;
+      document.getElementById("secondary_block").hidden = mode === "single";
+      document.getElementById("arbiter_block").hidden = mode !== "2plus1";
+      renderJudgeModelSelects();
     }
 
     function renderDashboardCards(cards) {
@@ -2397,9 +2449,21 @@ _INDEX_HTML = """
       const config = await (await fetch("/api/config")).json();
       csrfToken = config.csrf_token;
       const defaults = config.defaults || {};
-      for (const key of ["panel_mode", "dataset", "batch_size", "judge_execution_strategy", "judge_model", "secondary_judge_model", "arbiter_judge_model", "judge_arbitration_min_delta", "remote_judge_timeout_seconds", "remote_judge_temperature", "remote_judge_max_tokens", "remote_judge_top_p"]) {
+      judgeModelOptions = config.judge_model_options || [defaults.judge_model, defaults.secondary_judge_model, defaults.arbiter_judge_model].filter(Boolean);
+      for (const key of ["panel_mode", "dataset", "batch_size", "judge_execution_strategy", "judge_arbitration_min_delta", "remote_judge_timeout_seconds", "remote_judge_temperature", "remote_judge_max_tokens", "remote_judge_top_p"]) {
         if (defaults[key] !== null && defaults[key] !== undefined) document.getElementById(key).value = defaults[key];
       }
+      for (const key of ["judge_model", "secondary_judge_model", "arbiter_judge_model"]) {
+        const model = defaults[key];
+        if (model && !judgeModelOptions.includes(model)) judgeModelOptions.push(model);
+        if (model) document.getElementById(key).dataset.defaultValue = model;
+      }
+      renderJudgeModelSelects();
+      for (const key of ["judge_model", "secondary_judge_model", "arbiter_judge_model"]) {
+        const model = document.getElementById(key).dataset.defaultValue;
+        if (model) document.getElementById(key).value = model;
+      }
+      renderJudgeModelSelects();
       document.getElementById("always_run_arbiter").checked = Boolean(defaults.always_run_arbiter);
       document.getElementById("judge_save_raw_response").checked = Boolean(defaults.judge_save_raw_response);
       document.getElementById("remote_judge_openai_compatible").value = String(Boolean(defaults.remote_judge_openai_compatible));
@@ -2416,9 +2480,11 @@ _INDEX_HTML = """
             if (key === "always_run_arbiter") document.getElementById(key).checked = Boolean(val);
             else document.getElementById(key).value = val;
           }
+          renderJudgeBlocks();
         };
         presetRoot.appendChild(btn);
       }
+      renderJudgeBlocks();
       renderEndpointFields();
       document.getElementById("dry-run").disabled = false;
       document.getElementById("run").disabled = false;
@@ -2460,6 +2526,10 @@ _INDEX_HTML = """
         applyEndpointSources();
         renderEndpointFields();
       };
+    }
+    document.getElementById("panel_mode").onchange = renderJudgeBlocks;
+    for (const id of ["judge_model", "secondary_judge_model", "arbiter_judge_model"]) {
+      document.getElementById(id).onchange = renderJudgeModelSelects;
     }
 
     for (const button of document.querySelectorAll("[data-toggle-secret]")) {
