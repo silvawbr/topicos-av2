@@ -207,6 +207,27 @@ class FakeDashboardService:
                         }
                     ],
                 },
+                "ordinal_confusion": {
+                    "rows": ["Humano 1", "Humano 2", "Humano 3", "Humano 4", "Humano 5"],
+                    "columns": ["Juiz 1", "Juiz 2", "Juiz 3", "Juiz 4", "Juiz 5"],
+                    "matrix": [
+                        [0, 0, 0, 0, 1],
+                        [0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 1],
+                    ],
+                    "total": 2,
+                    "highlights": [
+                        {
+                            "label": "Humano baixo, juiz alto",
+                            "interpretation": "falso positivo grave",
+                            "count": 1,
+                            "share": 50.0,
+                        }
+                    ],
+                    "important_cases": [],
+                },
                 "divergences": [{"label": "modelo-candidato", "value": 1}],
                 "critical_cases": [{"label": "nota 1", "value": 1}],
                 "rubric_heatmap": {
@@ -310,12 +331,16 @@ def test_web_index_contains_progress_element() -> None:
     assert 'data-carousel-index="1"' in response.text
     assert 'data-carousel-index="2"' in response.text
     assert 'data-carousel-index="3"' in response.text
+    assert 'data-carousel-index="4"' in response.text
     assert "Correlacao juiz x referencia humana/gabarito" in response.text
     assert 'id="dashboard-reference-scatter"' in response.text
+    assert "Matriz de concordancia / divergencia" in response.text
+    assert 'id="dashboard-ordinal-confusion"' in response.text
     assert "Heatmap modelo x dimensao da rubrica" in response.text
     assert 'id="dashboard-rubric-heatmap"' in response.text
     assert "function renderModelDistributionChart" in response.text
     assert "function renderReferenceScatter" in response.text
+    assert "function renderOrdinalConfusion" in response.text
     assert "rho Spearman" in response.text
     assert "p-value" in response.text
     assert "function renderRubricHeatmap" in response.text
@@ -325,6 +350,7 @@ def test_web_index_contains_progress_element() -> None:
     assert "track.style.transform" in response.text
     assert "score_distribution_by_model" in response.text
     assert "reference_alignment" in response.text
+    assert "ordinal_confusion" in response.text
     assert "rubric_heatmap" in response.text
     assert "function buildPostRunStats" in response.text
     assert "function renderPostRunPanel" in response.text

@@ -202,3 +202,37 @@ def test_dashboard_reports_rubric_dimension_heatmap_by_candidate_model() -> None
             {"label": "modelo-b", "values": [2.0, 2.5, 3.0, 2.5], "count": 1},
         ],
     }
+
+
+def test_dashboard_reports_ordinal_confusion_matrix_and_error_highlights() -> None:
+    rows = [
+        _row(evaluation_id=1, answer_id=1, dataset="J2", candidate_answer="B", reference_answer="B", score=5),
+        _row(evaluation_id=2, answer_id=2, dataset="J2", candidate_answer="C", reference_answer="B", score=5),
+        _row(evaluation_id=3, answer_id=3, dataset="J2", candidate_answer="D", reference_answer="D", score=1),
+        _row(evaluation_id=4, answer_id=4, dataset="J2", candidate_answer="A", reference_answer="D", score=2),
+    ]
+
+    payload = build_dashboard_payload(rows, expected_answers=4, filters=DashboardFilters(dataset="J2"))
+
+    confusion = payload["charts"]["ordinal_confusion"]
+    assert confusion["rows"] == ["Humano 1", "Humano 2", "Humano 3", "Humano 4", "Humano 5"]
+    assert confusion["columns"] == ["Juiz 1", "Juiz 2", "Juiz 3", "Juiz 4", "Juiz 5"]
+    assert confusion["matrix"] == [
+        [0, 1, 0, 0, 1],
+        [0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0],
+        [1, 0, 0, 0, 1],
+    ]
+    assert confusion["total"] == 4
+    assert confusion["highlights"][0] == {
+        "label": "Humano baixo, juiz alto",
+        "interpretation": "falso positivo grave",
+        "count": 1,
+        "share": 25.0,
+    }
+    assert confusion["highlights"][1]["interpretation"] == "falso negativo"
+    assert confusion["highlights"][1]["count"] == 1
+    assert confusion["important_cases"][0]["reason"] == "falso positivo grave"
+    assert confusion["important_cases"][0]["reference_score"] == 1
+    assert confusion["important_cases"][0]["judge_score"] == 5

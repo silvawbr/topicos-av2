@@ -94,6 +94,7 @@ def build_dashboard_payload(
     consistency_spearman = _judge_arbiter_spearman(scored_rows)
     critical_cases = _critical_cases(rows)
     divergence_cases = _divergence_cases(successful_rows)
+    ordinal_confusion = _ordinal_confusion_matrix(scored_rows, filters.dataset)
 
     cards = {
         "evaluations": total_evaluations,
@@ -119,6 +120,7 @@ def build_dashboard_payload(
             "score_distribution_by_model": _score_distribution_by_model(scored_rows),
             "judge_average": _average_by(scored_rows, "judge_model"),
             "reference_alignment": _reference_alignment_points(scored_rows, filters.dataset),
+            "ordinal_confusion": ordinal_confusion,
             "divergences": _divergence_chart(divergence_cases),
             "critical_cases": _critical_chart(critical_cases),
             "rubric_heatmap": _rubric_heatmap(scored_rows),
@@ -340,6 +342,101 @@ def _reference_alignment_points(rows: list[dict[str, Any]], selected_dataset: st
         "x_label": "nota humana / score derivado do gabarito",
         "y_label": "nota do juiz",
     }
+
+
+def _ordinal_confusion_matrix(rows: list[dict[str, Any]], selected_dataset: str) -> dict[str, Any]:
+    labels = [1, 2, 3, 4, 5]
+    matrix = [[0 for _ in labels] for _ in labels]
+    total = 0
+    severe_false_positives = 0
+    false_negatives = 0
+    judge_score_counts = {score: 0 for score in labels}
+    important_cases: list[dict[str, Any]] = []
+
+    for row in rows:
+        reference_score = _ordinal_score(_reference_score(row, selected_dataset))
+        judge_score = _ordinal_score(row.get("score"))
+        if reference_score is None or judge_score is None:
+            continue
+        matrix[reference_score - 1][judge_score - 1] += 1
+        judge_score_counts[judge_score] += 1
+        total += 1
+        delta = judge_score - reference_score
+        if reference_score <= 2 and judge_score >= 4:
+            severe_false_positives += 1
+            important_cases.append(
+                _confusion_case(row, reference_score, judge_score, "falso positivo grave", delta)
+            )
+        elif reference_score >= 4 and judge_score <= 2:
+            false_negatives += 1
+            important_cases.append(_confusion_case(row, reference_score, judge_score, "falso negativo", delta))
+
+    lenient_total = judge_score_counts[4] + judge_score_counts[5]
+    conservative_total = judge_score_counts[2] + judge_score_counts[3]
+    lenient_share = _percent(lenient_total, total)
+    conservative_share = _percent(conservative_total, total)
+    highlights = [
+        {
+            "label": "Humano baixo, juiz alto",
+            "interpretation": "falso positivo grave",
+            "count": severe_false_positives,
+            "share": _percent(severe_false_positives, total),
+        },
+        {
+            "label": "Humano alto, juiz baixo",
+            "interpretation": "falso negativo",
+            "count": false_negatives,
+            "share": _percent(false_negatives, total),
+        },
+        {
+            "label": "Juiz nota 4/5",
+            "interpretation": "juiz leniente" if lenient_share is not None and lenient_share >= 60 else "tendencia a notas altas",
+            "count": lenient_total,
+            "share": lenient_share,
+        },
+        {
+            "label": "Juiz nota 2/3",
+            "interpretation": (
+                "juiz conservador demais"
+                if conservative_share is not None and conservative_share >= 60
+                else "tendencia a notas intermediarias/baixas"
+            ),
+            "count": conservative_total,
+            "share": conservative_share,
+        },
+    ]
+    return {
+        "rows": [f"Humano {score}" for score in labels],
+        "columns": [f"Juiz {score}" for score in labels],
+        "matrix": matrix,
+        "total": total,
+        "highlights": highlights,
+        "important_cases": sorted(important_cases, key=lambda case: (-abs(case["delta"]), case["answer_id"]))[:25],
+    }
+
+
+def _ordinal_score(value: Any) -> int | None:
+    try:
+        score = round(float(value))
+    except (TypeError, ValueError):
+        return None
+    if 1 <= score <= 5:
+        return int(score)
+    return None
+
+
+def _confusion_case(
+    row: dict[str, Any],
+    reference_score: int,
+    judge_score: int,
+    interpretation: str,
+    delta: int,
+) -> dict[str, Any]:
+    case = _case_row(row, reason=interpretation)
+    case["reference_score"] = reference_score
+    case["judge_score"] = judge_score
+    case["delta"] = delta
+    return case
 
 
 def _reference_score(row: dict[str, Any], selected_dataset: str) -> float | None:

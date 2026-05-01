@@ -761,6 +761,11 @@ _INDEX_HTML = """
     .heatmap-head { background:#eef3f8; color:var(--ink); font-weight:750; border-color:var(--line); }
     .heatmap-model { justify-content:flex-start; background:#f8fafc; color:var(--ink); font-weight:750; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .heatmap-value { color:#111827; font-weight:750; }
+    .confusion-layout { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(240px,.8fr); gap:14px; align-items:start; }
+    .confusion-summary { display:grid; gap:8px; }
+    .confusion-card { border:1px solid var(--line); border-radius:8px; padding:10px; background:#fbfcfe; }
+    .confusion-card strong { display:block; font-size:13px; margin-bottom:4px; }
+    .confusion-card span { color:var(--muted); font-size:12px; }
     .scatter-wrap { width:100%; overflow:auto; border:1px solid var(--line); border-radius:8px; background:#fbfcfe; }
     .scatter-svg { display:block; width:100%; min-width:680px; height:auto; }
     .scatter-axis { stroke:#9aa7b7; stroke-width:1; }
@@ -872,7 +877,8 @@ _INDEX_HTML = """
             <button class="carousel-tab active" type="button" data-carousel-index="0" role="tab" aria-selected="true">Indicadores gerais</button>
             <button class="carousel-tab" type="button" data-carousel-index="1" role="tab" aria-selected="false">Distribuicao das notas por modelo</button>
             <button class="carousel-tab" type="button" data-carousel-index="2" role="tab" aria-selected="false">Juiz x referencia</button>
-            <button class="carousel-tab" type="button" data-carousel-index="3" role="tab" aria-selected="false">Heatmap rubrica</button>
+            <button class="carousel-tab" type="button" data-carousel-index="3" role="tab" aria-selected="false">Matriz concordancia</button>
+            <button class="carousel-tab" type="button" data-carousel-index="4" role="tab" aria-selected="false">Heatmap rubrica</button>
           </div>
           <div class="carousel-controls" aria-label="Navegacao do carousel">
             <button id="dashboard-model-carousel-prev" class="carousel-button" type="button" aria-label="Pagina anterior">&lsaquo;</button>
@@ -915,6 +921,10 @@ _INDEX_HTML = """
             <div class="dashboard-carousel-slide">
               <h3>Correlacao juiz x referencia humana/gabarito</h3>
               <div id="dashboard-reference-scatter" class="scatter-wrap"></div>
+            </div>
+            <div class="dashboard-carousel-slide">
+              <h3>Matriz de concordancia / divergencia</h3>
+              <div id="dashboard-ordinal-confusion" class="confusion-layout"></div>
             </div>
             <div class="dashboard-carousel-slide">
               <h3>Heatmap modelo x dimensao da rubrica</h3>
@@ -1306,6 +1316,7 @@ _INDEX_HTML = """
       renderDashboardCards(data.cards || {});
       renderModelDistributionChart(data.charts?.score_distribution_by_model || []);
       renderReferenceScatter(data.charts?.reference_alignment || {}, data.cards?.spearman_reference || {});
+      renderOrdinalConfusion(data.charts?.ordinal_confusion || {});
       renderRubricHeatmap(data.charts?.rubric_heatmap || {});
       renderBarChart("dashboard-candidate-ranking", data.charts?.candidate_ranking || [], {scaleMax: 5});
       renderBarChart("dashboard-score-distribution", data.charts?.score_distribution || [], {scaleMax: 1, showPercent: true, colorByLabel: true});
@@ -1458,6 +1469,66 @@ _INDEX_HTML = """
         });
       });
       root.appendChild(grid);
+    }
+
+    function renderOrdinalConfusion(confusion) {
+      const root = document.getElementById("dashboard-ordinal-confusion");
+      root.textContent = "";
+      const rows = confusion.rows || [];
+      const columns = confusion.columns || [];
+      const matrix = confusion.matrix || [];
+      if (!rows.length || !columns.length || !Number(confusion.total)) {
+        const empty = document.createElement("div");
+        empty.className = "muted carousel-empty";
+        empty.textContent = "Sem pares humano x juiz para o filtro atual.";
+        root.appendChild(empty);
+        return;
+      }
+      const heatmap = document.createElement("div");
+      heatmap.className = "heatmap-wrap";
+      const grid = document.createElement("div");
+      grid.className = "heatmap-grid";
+      grid.style.gridTemplateColumns = `minmax(118px, 1.1fr) repeat(${columns.length}, minmax(86px, 1fr))`;
+      grid.appendChild(heatmapCell("Humano \\ Juiz", "heatmap-head"));
+      columns.forEach((column) => grid.appendChild(heatmapCell(column, "heatmap-head")));
+      const maxValue = Math.max(1, ...matrix.flat().map((value) => Number(value) || 0));
+      rows.forEach((label, rowIndex) => {
+        grid.appendChild(heatmapCell(label, "heatmap-model"));
+        columns.forEach((column, columnIndex) => {
+          const value = Number(matrix[rowIndex]?.[columnIndex]) || 0;
+          const cell = heatmapCell(String(value), "heatmap-value");
+          cell.style.background = confusionHeatmapColor(value, maxValue, rowIndex, columnIndex);
+          cell.title = `${label}, ${column}: ${value}`;
+          grid.appendChild(cell);
+        });
+      });
+      heatmap.appendChild(grid);
+      const summary = document.createElement("div");
+      summary.className = "confusion-summary";
+      (confusion.highlights || []).forEach((item) => summary.appendChild(confusionSummaryCard(item)));
+      root.appendChild(heatmap);
+      root.appendChild(summary);
+    }
+
+    function confusionHeatmapColor(value, maxValue, rowIndex, columnIndex) {
+      if (!value) return "#f4f7fb";
+      const ratio = Math.max(0.14, Math.min(1, value / maxValue));
+      if (columnIndex - rowIndex >= 3) return `rgba(180, 35, 24, ${0.2 + ratio * 0.58})`;
+      if (rowIndex - columnIndex >= 3) return `rgba(154, 91, 0, ${0.2 + ratio * 0.58})`;
+      if (rowIndex === columnIndex) return `rgba(29, 127, 78, ${0.18 + ratio * 0.54})`;
+      return `rgba(23, 105, 170, ${0.14 + ratio * 0.42})`;
+    }
+
+    function confusionSummaryCard(item) {
+      const card = document.createElement("div");
+      card.className = "confusion-card";
+      const title = document.createElement("strong");
+      title.textContent = `${item.count ?? 0} - ${item.interpretation || item.label}`;
+      const detail = document.createElement("span");
+      detail.textContent = `${item.label || "-"} (${displayPercent(item.share)})`;
+      card.appendChild(title);
+      card.appendChild(detail);
+      return card;
     }
 
     function heatmapCell(text, className) {
