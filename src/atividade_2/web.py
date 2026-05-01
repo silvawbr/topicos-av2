@@ -726,6 +726,55 @@ _INDEX_HTML = """
     .chart-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px,1fr)); gap:14px; }
     .chart { border:1px solid var(--line); border-radius:8px; padding:12px; min-width:0; }
     .chart h3 { margin:0 0 10px; font-size:13px; }
+    .carousel-card { border:1px solid #b9d5eb; border-radius:8px; padding:12px; margin:0 0 14px; background:#fff; overflow:hidden; box-shadow:0 8px 22px rgba(23,105,170,.08); }
+    .carousel-head { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; padding-bottom:10px; border-bottom:1px solid var(--line); }
+    .carousel-controls { display:flex; align-items:center; gap:8px; }
+    .carousel-button { width:38px; min-height:34px; padding:0; border-color:#b9d5eb; background:#f2f8fd; color:var(--accent); font-size:20px; line-height:1; }
+    .carousel-tabs { display:flex; align-items:center; gap:6px; min-width:0; overflow:auto; }
+    .carousel-tab { min-height:36px; padding:0 12px; border-color:var(--line); background:#fff; color:var(--muted); font-size:13px; font-weight:750; white-space:nowrap; }
+    .carousel-tab.active { border-color:var(--accent); background:var(--accent); color:#fff; box-shadow:0 6px 14px rgba(23,105,170,.24); }
+    .carousel-viewport { width:100%; overflow:hidden; touch-action:pan-y; }
+    .carousel-track { display:flex; gap:0; width:100%; transform:translateX(0); transition:transform .24s ease; }
+    .dashboard-carousel-slide { flex:0 0 100%; width:100%; min-width:100%; padding:2px; }
+    .dashboard-carousel-slide h3 { margin:0 0 10px; font-size:13px; }
+    .dashboard-carousel-slide .metric-grid { margin-bottom:0; }
+    .model-distribution-list { display:grid; gap:10px; }
+    .model-distribution-card { border:1px solid var(--line); border-radius:8px; padding:12px; background:#fbfcfe; }
+    .model-card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:10px; }
+    .model-card-title { min-width:0; font-weight:750; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .model-card-meta { color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .stacked-bar { display:flex; height:18px; border-radius:999px; overflow:hidden; background:#e5e9f0; box-shadow:inset 0 0 0 1px rgba(24,33,47,.04); }
+    .stacked-segment { min-width:0; transition:width .24s ease; }
+    .stacked-segment.score-1 { background:#b42318; }
+    .stacked-segment.score-2 { background:#d97706; }
+    .stacked-segment.score-3 { background:#1769aa; }
+    .stacked-segment.score-4 { background:#1d7f4e; }
+    .stacked-segment.score-5 { background:#0f766e; }
+    .score-legend { display:grid; grid-template-columns:repeat(5, minmax(72px,1fr)); gap:6px; margin-top:10px; overflow:auto; padding-bottom:2px; }
+    .score-chip { display:flex; justify-content:space-between; align-items:center; gap:4px; min-width:0; border:1px solid var(--line); border-radius:6px; padding:5px 6px; color:var(--muted); font-size:12px; }
+    .score-swatch { width:8px; height:8px; border-radius:999px; flex:0 0 auto; }
+    .score-chip strong { color:var(--ink); font-variant-numeric:tabular-nums; }
+    .carousel-empty { width:100%; }
+    .heatmap-wrap { width:100%; overflow:auto; border:1px solid var(--line); border-radius:8px; }
+    .heatmap-grid { display:grid; min-width:620px; font-size:12px; }
+    .heatmap-cell { min-height:42px; display:flex; align-items:center; justify-content:center; padding:8px; border-right:1px solid rgba(255,255,255,.42); border-bottom:1px solid rgba(255,255,255,.42); font-variant-numeric:tabular-nums; }
+    .heatmap-head { background:#eef3f8; color:var(--ink); font-weight:750; border-color:var(--line); }
+    .heatmap-model { justify-content:flex-start; background:#f8fafc; color:var(--ink); font-weight:750; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .heatmap-value { color:#111827; font-weight:750; }
+    .confusion-layout { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(240px,.8fr); gap:14px; align-items:start; }
+    .confusion-summary { display:grid; gap:8px; }
+    .confusion-card { border:1px solid var(--line); border-radius:8px; padding:10px; background:#fbfcfe; }
+    .confusion-card strong { display:block; font-size:13px; margin-bottom:4px; }
+    .confusion-card span { color:var(--muted); font-size:12px; }
+    .critical-error-table table { min-width:1120px; }
+    .critical-error-table a { color:var(--accent); font-weight:650; text-decoration:none; }
+    .scatter-wrap { width:100%; overflow:auto; border:1px solid var(--line); border-radius:8px; background:#fbfcfe; }
+    .scatter-svg { display:block; width:100%; min-width:680px; height:auto; }
+    .scatter-axis { stroke:#9aa7b7; stroke-width:1; }
+    .scatter-grid { stroke:#e5e9f0; stroke-width:1; }
+    .scatter-point { fill:#1769aa; fill-opacity:.72; stroke:#fff; stroke-width:1.5; }
+    .scatter-label { fill:var(--muted); font-size:12px; }
+    .scatter-stat { fill:var(--ink); font-size:13px; font-weight:750; }
     .bar-row { display:grid; grid-template-columns:minmax(82px,132px) minmax(88px,1fr) 104px; gap:8px; align-items:center; margin:7px 0; font-size:12px; }
     .bar-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
     .bar-track { height:14px; border-radius:999px; background:#e5e9f0; overflow:hidden; box-shadow:inset 0 0 0 1px rgba(24,33,47,.03); }
@@ -824,50 +873,119 @@ _INDEX_HTML = """
           <span id="database-dump-status" class="status"></span>
         </div>
       </div>
-      <div id="dashboard-cards" class="metric-grid"></div>
-      <div class="chart-grid">
-        <div class="chart">
-          <h3>Ranking geral dos modelos candidatos</h3>
-          <div id="dashboard-candidate-ranking"></div>
+      <div class="carousel-card" aria-label="Resumo do dashboard">
+        <div class="carousel-head">
+          <div id="dashboard-model-carousel-dots" class="carousel-tabs" role="tablist" aria-label="Paginas do dashboard">
+            <button class="carousel-tab active" type="button" data-carousel-index="0" role="tab" aria-selected="true">Indicadores gerais</button>
+            <button class="carousel-tab" type="button" data-carousel-index="1" role="tab" aria-selected="false">Distribuicao das notas por modelo</button>
+            <button class="carousel-tab" type="button" data-carousel-index="2" role="tab" aria-selected="false">Juiz x referencia</button>
+            <button class="carousel-tab" type="button" data-carousel-index="3" role="tab" aria-selected="false">Matriz concordancia</button>
+            <button class="carousel-tab" type="button" data-carousel-index="4" role="tab" aria-selected="false">Heatmap rubrica</button>
+            <button class="carousel-tab" type="button" data-carousel-index="5" role="tab" aria-selected="false">Especialidades juridicas</button>
+            <button class="carousel-tab" type="button" data-carousel-index="6" role="tab" aria-selected="false">Erros criticos</button>
+          </div>
+          <div class="carousel-controls" aria-label="Navegacao do carousel">
+            <button id="dashboard-model-carousel-prev" class="carousel-button" type="button" aria-label="Pagina anterior">&lsaquo;</button>
+            <button id="dashboard-model-carousel-next" class="carousel-button" type="button" aria-label="Proxima pagina">&rsaquo;</button>
+          </div>
         </div>
-        <div class="chart">
-          <h3>Distribuicao de notas 1-5</h3>
-          <div id="dashboard-score-distribution"></div>
+        <div class="carousel-viewport">
+          <div id="dashboard-model-distribution-carousel" class="carousel-track">
+            <div class="dashboard-carousel-slide">
+              <h3>Indicadores gerais</h3>
+              <div id="dashboard-cards" class="metric-grid"></div>
+              <div class="chart-grid">
+                <div class="chart">
+                  <h3>Ranking geral dos modelos candidatos</h3>
+                  <div id="dashboard-candidate-ranking"></div>
+                </div>
+                <div class="chart">
+                  <h3>Distribuicao de notas 1-5</h3>
+                  <div id="dashboard-score-distribution"></div>
+                </div>
+                <div class="chart">
+                  <h3>Media por juiz</h3>
+                  <div id="dashboard-judge-average"></div>
+                </div>
+                <div class="chart">
+                  <h3>Divergencias para auditoria</h3>
+                  <div id="dashboard-divergences"></div>
+                </div>
+                <div class="chart">
+                  <h3>Casos criticos</h3>
+                  <div id="dashboard-critical-chart"></div>
+                </div>
+              </div>
+              <p id="dashboard-methodology" class="dashboard-note"></p>
+              <h3 style="margin-top:18px">Casos criticos e divergencias</h3>
+              <div class="table-wrap dashboard-table">
+                <table aria-label="Casos criticos do dashboard">
+                  <thead>
+                    <tr>
+                      <th>motivo</th>
+                      <th>dataset</th>
+                      <th>id_resposta</th>
+                      <th>id_pergunta</th>
+                      <th>modelo_candidato</th>
+                      <th>juiz</th>
+                      <th>papel</th>
+                      <th>nota</th>
+                      <th>status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="dashboard-cases-body">
+                    <tr><td colspan="9" class="muted">Carregando dashboard.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div class="dashboard-carousel-slide">
+              <h3>Distribuicao das notas por modelo</h3>
+              <div id="dashboard-model-distribution-chart" class="model-distribution-list"></div>
+            </div>
+            <div class="dashboard-carousel-slide">
+              <h3>Correlacao juiz x referencia humana/gabarito</h3>
+              <div id="dashboard-reference-scatter" class="scatter-wrap"></div>
+            </div>
+            <div class="dashboard-carousel-slide">
+              <h3>Matriz de concordancia / divergencia</h3>
+              <div id="dashboard-ordinal-confusion" class="confusion-layout"></div>
+            </div>
+            <div class="dashboard-carousel-slide">
+              <h3>Heatmap modelo x dimensao da rubrica</h3>
+              <div id="dashboard-rubric-heatmap" class="heatmap-wrap"></div>
+            </div>
+            <div class="dashboard-carousel-slide">
+              <h3>Desempenho por especialidade juridica</h3>
+              <div id="dashboard-legal-specialty-performance" class="heatmap-wrap"></div>
+            </div>
+            <div class="dashboard-carousel-slide">
+              <h3>Analise de erros criticos</h3>
+              <div class="chart">
+                <h3>Categorias de erro</h3>
+                <div id="dashboard-critical-error-chart"></div>
+              </div>
+              <div class="table-wrap critical-error-table">
+                <table aria-label="Analise de erros criticos">
+                  <thead>
+                    <tr>
+                      <th>Pergunta</th>
+                      <th>Modelo candidato</th>
+                      <th>Juiz</th>
+                      <th>Nota</th>
+                      <th>Tipo de erro</th>
+                      <th>Justificativa curta</th>
+                      <th>Link para log</th>
+                    </tr>
+                  </thead>
+                  <tbody id="dashboard-critical-error-body">
+                    <tr><td colspan="7" class="muted">Carregando analise.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="chart">
-          <h3>Media por juiz</h3>
-          <div id="dashboard-judge-average"></div>
-        </div>
-        <div class="chart">
-          <h3>Divergencias para auditoria</h3>
-          <div id="dashboard-divergences"></div>
-        </div>
-        <div class="chart">
-          <h3>Casos criticos</h3>
-          <div id="dashboard-critical-chart"></div>
-        </div>
-      </div>
-      <p id="dashboard-methodology" class="dashboard-note"></p>
-      <h2 style="margin-top:18px">Casos criticos e divergencias</h2>
-      <div class="table-wrap dashboard-table">
-        <table aria-label="Casos criticos do dashboard">
-          <thead>
-            <tr>
-              <th>motivo</th>
-              <th>dataset</th>
-              <th>id_resposta</th>
-              <th>id_pergunta</th>
-              <th>modelo_candidato</th>
-              <th>juiz</th>
-              <th>papel</th>
-              <th>nota</th>
-              <th>status</th>
-            </tr>
-          </thead>
-          <tbody id="dashboard-cases-body">
-            <tr><td colspan="9" class="muted">Carregando dashboard.</td></tr>
-          </tbody>
-        </table>
       </div>
     </section>
   </main>
@@ -1229,6 +1347,12 @@ _INDEX_HTML = """
       populateSelect("dashboard_candidate_model", data.options?.candidate_models || [], selectedValues("dashboard_candidate_model"));
       populateSelect("dashboard_judge_model", data.options?.judge_models || [], selectedValues("dashboard_judge_model"));
       renderDashboardCards(data.cards || {});
+      renderModelDistributionChart(data.charts?.score_distribution_by_model || []);
+      renderReferenceScatter(data.charts?.reference_alignment || {}, data.cards?.spearman_reference || {});
+      renderOrdinalConfusion(data.charts?.ordinal_confusion || {});
+      renderRubricHeatmap(data.charts?.rubric_heatmap || {});
+      renderLegalSpecialtyPerformance(data.charts?.legal_specialty_performance || {});
+      renderCriticalErrorAnalysis(data.charts?.critical_error_categories || [], data.tables?.critical_error_analysis || []);
       renderBarChart("dashboard-candidate-ranking", data.charts?.candidate_ranking || [], {scaleMax: 5});
       renderBarChart("dashboard-score-distribution", data.charts?.score_distribution || [], {scaleMax: 1, showPercent: true, colorByLabel: true});
       renderBarChart("dashboard-judge-average", data.charts?.judge_average || [], {scaleMax: 5});
@@ -1285,6 +1409,388 @@ _INDEX_HTML = """
         }
         root.appendChild(card);
       }
+    }
+
+    function renderModelDistributionChart(rows) {
+      const root = document.getElementById("dashboard-model-distribution-chart");
+      root.textContent = "";
+      if (!rows.length) {
+        const empty = document.createElement("div");
+        empty.className = "muted carousel-empty";
+        empty.textContent = "Sem dados por modelo.";
+        root.appendChild(empty);
+        return;
+      }
+      rows.forEach((row) => {
+        const card = document.createElement("div");
+        card.className = "model-distribution-card";
+        const head = document.createElement("div");
+        head.className = "model-card-head";
+        const title = document.createElement("div");
+        title.className = "model-card-title";
+        title.title = row.label;
+        title.textContent = row.label;
+        const meta = document.createElement("div");
+        meta.className = "model-card-meta";
+        meta.textContent = `media ${formatAverage(row.average)} - n=${display(row.total)}`;
+        head.appendChild(title);
+        head.appendChild(meta);
+        card.appendChild(head);
+        card.appendChild(stackedScoreBar(row));
+        card.appendChild(scoreLegend(row));
+        root.appendChild(card);
+      });
+    }
+
+    function stackedScoreBar(row) {
+      const total = Number(row.total) || 0;
+      const bar = document.createElement("div");
+      bar.className = "stacked-bar";
+      for (const score of ["1", "2", "3", "4", "5"]) {
+        const value = Number(row.scores?.[score]) || 0;
+        const segment = document.createElement("span");
+        segment.className = `stacked-segment score-${score}`;
+        segment.title = `Nota ${score}: ${value}`;
+        segment.style.width = `${total ? (value / total) * 100 : 0}%`;
+        bar.appendChild(segment);
+      }
+      return bar;
+    }
+
+    function scoreLegend(row) {
+      const legend = document.createElement("div");
+      legend.className = "score-legend";
+      for (const score of ["1", "2", "3", "4", "5"]) {
+        const chip = document.createElement("span");
+        chip.className = "score-chip";
+        const label = document.createElement("span");
+        const swatch = document.createElement("span");
+        swatch.className = `score-swatch stacked-segment score-${score}`;
+        label.appendChild(swatch);
+        label.appendChild(document.createTextNode(` ${score}`));
+        const value = document.createElement("strong");
+        value.textContent = String(Number(row.scores?.[score]) || 0);
+        chip.appendChild(label);
+        chip.appendChild(value);
+        legend.appendChild(chip);
+      }
+      return legend;
+    }
+
+    function renderRubricHeatmap(heatmap) {
+      const root = document.getElementById("dashboard-rubric-heatmap");
+      root.textContent = "";
+      const columns = heatmap.columns || [];
+      const rows = heatmap.rows || [];
+      if (!columns.length || !rows.length) {
+        const empty = document.createElement("div");
+        empty.className = "muted carousel-empty";
+        empty.textContent = "Sem scores dimensionais para o filtro atual.";
+        root.appendChild(empty);
+        return;
+      }
+      const grid = document.createElement("div");
+      grid.className = "heatmap-grid";
+      grid.style.gridTemplateColumns = `minmax(160px, 1.4fr) repeat(${columns.length}, minmax(112px, 1fr))`;
+      grid.appendChild(heatmapCell("Modelo", "heatmap-head"));
+      columns.forEach((column) => grid.appendChild(heatmapCell(column, "heatmap-head")));
+      rows.forEach((row) => {
+        grid.appendChild(heatmapCell(row.label, "heatmap-model"));
+        (row.values || []).forEach((value) => {
+          const cell = heatmapCell(value == null ? "-" : formatAverage(value), "heatmap-value");
+          cell.style.background = heatmapColor(value);
+          cell.title = `${row.label} - n=${display(row.count)}`;
+          grid.appendChild(cell);
+        });
+      });
+      root.appendChild(grid);
+    }
+
+    function renderLegalSpecialtyPerformance(heatmap) {
+      const root = document.getElementById("dashboard-legal-specialty-performance");
+      root.textContent = "";
+      const columns = heatmap.columns || [];
+      const rows = heatmap.rows || [];
+      if (!columns.length || !rows.length) {
+        const empty = document.createElement("div");
+        empty.className = "muted carousel-empty";
+        empty.textContent = "Sem especialidades juridicas para o filtro atual.";
+        root.appendChild(empty);
+        return;
+      }
+      const grid = document.createElement("div");
+      grid.className = "heatmap-grid";
+      grid.style.gridTemplateColumns = `minmax(180px, 1.3fr) repeat(${columns.length}, minmax(112px, 1fr)) minmax(70px, .55fr)`;
+      grid.appendChild(heatmapCell("Especialidade", "heatmap-head"));
+      columns.forEach((column) => grid.appendChild(heatmapCell(column, "heatmap-head")));
+      grid.appendChild(heatmapCell("n", "heatmap-head"));
+      rows.forEach((row) => {
+        grid.appendChild(heatmapCell(row.label, "heatmap-model"));
+        (row.values || []).forEach((value, index) => {
+          const model = columns[index] || "modelo";
+          const cell = heatmapCell(value == null ? "-" : formatAverage(value), "heatmap-value");
+          cell.style.background = heatmapColor(value);
+          cell.title = `${row.label} | ${model} | media ${display(value)} | n=${display(row.count)}`;
+          grid.appendChild(cell);
+        });
+        grid.appendChild(heatmapCell(display(row.count), "heatmap-head"));
+      });
+      root.appendChild(grid);
+    }
+
+    function renderOrdinalConfusion(confusion) {
+      const root = document.getElementById("dashboard-ordinal-confusion");
+      root.textContent = "";
+      const rows = confusion.rows || [];
+      const columns = confusion.columns || [];
+      const matrix = confusion.matrix || [];
+      if (!rows.length || !columns.length || !Number(confusion.total)) {
+        const empty = document.createElement("div");
+        empty.className = "muted carousel-empty";
+        empty.textContent = "Sem pares humano x juiz para o filtro atual.";
+        root.appendChild(empty);
+        return;
+      }
+      const heatmap = document.createElement("div");
+      heatmap.className = "heatmap-wrap";
+      const grid = document.createElement("div");
+      grid.className = "heatmap-grid";
+      grid.style.gridTemplateColumns = `minmax(118px, 1.1fr) repeat(${columns.length}, minmax(86px, 1fr))`;
+      grid.appendChild(heatmapCell("Humano \\ Juiz", "heatmap-head"));
+      columns.forEach((column) => grid.appendChild(heatmapCell(column, "heatmap-head")));
+      const maxValue = Math.max(1, ...matrix.flat().map((value) => Number(value) || 0));
+      rows.forEach((label, rowIndex) => {
+        grid.appendChild(heatmapCell(label, "heatmap-model"));
+        columns.forEach((column, columnIndex) => {
+          const value = Number(matrix[rowIndex]?.[columnIndex]) || 0;
+          const cell = heatmapCell(String(value), "heatmap-value");
+          cell.style.background = confusionHeatmapColor(value, maxValue, rowIndex, columnIndex);
+          cell.title = `${label}, ${column}: ${value}`;
+          grid.appendChild(cell);
+        });
+      });
+      heatmap.appendChild(grid);
+      const summary = document.createElement("div");
+      summary.className = "confusion-summary";
+      (confusion.highlights || []).forEach((item) => summary.appendChild(confusionSummaryCard(item)));
+      root.appendChild(heatmap);
+      root.appendChild(summary);
+    }
+
+    function confusionHeatmapColor(value, maxValue, rowIndex, columnIndex) {
+      if (!value) return "#f4f7fb";
+      const ratio = Math.max(0.14, Math.min(1, value / maxValue));
+      if (columnIndex - rowIndex >= 3) return `rgba(180, 35, 24, ${0.2 + ratio * 0.58})`;
+      if (rowIndex - columnIndex >= 3) return `rgba(154, 91, 0, ${0.2 + ratio * 0.58})`;
+      if (rowIndex === columnIndex) return `rgba(29, 127, 78, ${0.18 + ratio * 0.54})`;
+      return `rgba(23, 105, 170, ${0.14 + ratio * 0.42})`;
+    }
+
+    function confusionSummaryCard(item) {
+      const card = document.createElement("div");
+      card.className = "confusion-card";
+      const title = document.createElement("strong");
+      title.textContent = `${item.count ?? 0} - ${item.interpretation || item.label}`;
+      const detail = document.createElement("span");
+      detail.textContent = `${item.label || "-"} (${displayPercent(item.share)})`;
+      card.appendChild(title);
+      card.appendChild(detail);
+      return card;
+    }
+
+    function heatmapCell(text, className) {
+      const cell = document.createElement("div");
+      cell.className = `heatmap-cell ${className}`;
+      cell.textContent = text;
+      return cell;
+    }
+
+    function heatmapColor(value) {
+      if (value == null) return "#eef2f7";
+      const score = Math.max(1, Math.min(5, Number(value)));
+      const ratio = (score - 1) / 4;
+      const hue = 8 + ratio * 136;
+      const lightness = 88 - ratio * 25;
+      return `hsl(${hue}, 62%, ${lightness}%)`;
+    }
+
+    function renderReferenceScatter(series, spearman) {
+      const root = document.getElementById("dashboard-reference-scatter");
+      root.textContent = "";
+      const points = series.points || [];
+      if (!points.length) {
+        const empty = document.createElement("div");
+        empty.className = "muted carousel-empty";
+        empty.textContent = "Sem pares referencia x juiz para o filtro atual.";
+        root.appendChild(empty);
+        return;
+      }
+      const width = 760;
+      const height = 430;
+      const margin = {top: 46, right: 24, bottom: 58, left: 68};
+      const plotWidth = width - margin.left - margin.right;
+      const plotHeight = height - margin.top - margin.bottom;
+      const minScore = 1;
+      const maxScore = 5;
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+      svg.setAttribute("role", "img");
+      svg.setAttribute("class", "scatter-svg");
+      svg.setAttribute("aria-label", "Scatter plot de nota de referencia no eixo X e nota do juiz no eixo Y");
+
+      const stat = document.createElementNS(svg.namespaceURI, "text");
+      stat.setAttribute("x", String(margin.left));
+      stat.setAttribute("y", "25");
+      stat.setAttribute("class", "scatter-stat");
+      stat.textContent = `rho Spearman = ${formatSpearmanValue(spearman.value)} | p-value = ${formatPValue(spearman.p_value)} | n = ${display(spearman.sample_size ?? points.length)}`;
+      svg.appendChild(stat);
+
+      for (let score = minScore; score <= maxScore; score += 1) {
+        const x = scaleScore(score, minScore, maxScore, margin.left, plotWidth);
+        const y = scaleScore(score, minScore, maxScore, margin.top + plotHeight, -plotHeight);
+        svg.appendChild(svgLine(x, margin.top, x, margin.top + plotHeight, "scatter-grid"));
+        svg.appendChild(svgLine(margin.left, y, margin.left + plotWidth, y, "scatter-grid"));
+        svg.appendChild(svgText(x, margin.top + plotHeight + 24, String(score), "scatter-label", "middle"));
+        svg.appendChild(svgText(margin.left - 18, y + 4, String(score), "scatter-label", "end"));
+      }
+      svg.appendChild(svgLine(margin.left, margin.top + plotHeight, margin.left + plotWidth, margin.top + plotHeight, "scatter-axis"));
+      svg.appendChild(svgLine(margin.left, margin.top, margin.left, margin.top + plotHeight, "scatter-axis"));
+
+      for (const point of points) {
+        const seed = Number(point.evaluation_id || point.answer_id || 0);
+        const jitterX = deterministicJitter(seed, 13);
+        const jitterY = deterministicJitter(seed * 7, 13);
+        const circle = document.createElementNS(svg.namespaceURI, "circle");
+        circle.setAttribute("cx", String(scaleScore(point.reference_score, minScore, maxScore, margin.left, plotWidth) + jitterX));
+        circle.setAttribute("cy", String(scaleScore(point.judge_score, minScore, maxScore, margin.top + plotHeight, -plotHeight) + jitterY));
+        circle.setAttribute("r", "5.5");
+        circle.setAttribute("class", "scatter-point");
+        const title = document.createElementNS(svg.namespaceURI, "title");
+        title.textContent = `resposta ${point.answer_id}: referencia ${point.reference_score}, juiz ${point.judge_score}`;
+        circle.appendChild(title);
+        svg.appendChild(circle);
+      }
+      svg.appendChild(svgText(margin.left + plotWidth / 2, height - 16, series.x_label || "referencia", "scatter-label", "middle"));
+      const yLabel = svgText(18, margin.top + plotHeight / 2, series.y_label || "nota do juiz", "scatter-label", "middle");
+      yLabel.setAttribute("transform", `rotate(-90 18 ${margin.top + plotHeight / 2})`);
+      svg.appendChild(yLabel);
+      root.appendChild(svg);
+    }
+
+    function renderCriticalErrorAnalysis(categories, cases) {
+      renderBarChart("dashboard-critical-error-chart", categories || [], {scaleMax: 1, showPercent: true, tone: "bad"});
+      const body = document.getElementById("dashboard-critical-error-body");
+      body.textContent = "";
+      if (!cases.length) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 7;
+        cell.className = "muted";
+        cell.textContent = "Sem erros criticos detectados no filtro atual.";
+        row.appendChild(cell);
+        body.appendChild(row);
+        return;
+      }
+      cases.slice(0, 40).forEach((item) => {
+        const row = document.createElement("tr");
+        for (const value of [
+          item.question_id,
+          item.candidate_model,
+          item.judge_model,
+          item.score,
+          item.error_type,
+          item.short_justification
+        ]) appendCell(row, display(value));
+        const logCell = document.createElement("td");
+        if (item.log_url) {
+          const link = document.createElement("a");
+          link.href = item.log_url;
+          link.target = "_blank";
+          link.rel = "noopener";
+          link.textContent = "Abrir log";
+          logCell.appendChild(link);
+        } else {
+          logCell.textContent = "-";
+        }
+        row.appendChild(logCell);
+        body.appendChild(row);
+      });
+    }
+
+    function scaleScore(value, minScore, maxScore, origin, span) {
+      return origin + ((Number(value) - minScore) / (maxScore - minScore)) * span;
+    }
+
+    function deterministicJitter(seed, amplitude) {
+      const value = Math.sin(seed * 12.9898) * 43758.5453;
+      return (value - Math.floor(value) - 0.5) * amplitude;
+    }
+
+    function svgLine(x1, y1, x2, y2, className) {
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      line.setAttribute("x1", String(x1));
+      line.setAttribute("y1", String(y1));
+      line.setAttribute("x2", String(x2));
+      line.setAttribute("y2", String(y2));
+      line.setAttribute("class", className);
+      return line;
+    }
+
+    function svgText(x, y, text, className, anchor) {
+      const node = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      node.setAttribute("x", String(x));
+      node.setAttribute("y", String(y));
+      node.setAttribute("class", className);
+      node.setAttribute("text-anchor", anchor);
+      node.textContent = text;
+      return node;
+    }
+
+    function formatSpearmanValue(value) {
+      return value == null ? "-" : Number(value).toFixed(2);
+    }
+
+    function formatPValue(value) {
+      if (value == null) return "-";
+      const number = Number(value);
+      return number < 0.001 ? "<0.001" : number.toFixed(3);
+    }
+
+    let dashboardCarouselIndex = 0;
+
+    function moveCarousel(delta) {
+      const track = document.getElementById("dashboard-model-distribution-carousel");
+      const cards = Array.from(track.querySelectorAll(".dashboard-carousel-slide"));
+      if (!cards.length) return;
+      const nextIndex = (dashboardCarouselIndex + delta + cards.length) % cards.length;
+      goToCarouselPage(nextIndex);
+    }
+
+    function goToCarouselPage(index) {
+      const track = document.getElementById("dashboard-model-distribution-carousel");
+      const cards = Array.from(track.querySelectorAll(".dashboard-carousel-slide"));
+      if (!cards.length) return;
+      const nextIndex = (index + cards.length) % cards.length;
+      dashboardCarouselIndex = nextIndex;
+      track.style.transform = `translateX(-${nextIndex * 100}%)`;
+      updateCarouselState();
+    }
+
+    function updateCarouselState() {
+      const track = document.getElementById("dashboard-model-distribution-carousel");
+      const cards = Array.from(track.querySelectorAll(".dashboard-carousel-slide"));
+      const index = dashboardCarouselIndex;
+      cards.forEach((card, cardIndex) => card.classList.toggle("active", cardIndex === index));
+      for (const [tabIndex, tab] of Array.from(document.getElementById("dashboard-model-carousel-dots").children).entries()) {
+        tab.classList.toggle("active", tabIndex === index);
+        tab.setAttribute("aria-selected", String(tabIndex === index));
+      }
+      updateCarouselControls(index, cards.length);
+    }
+
+    function updateCarouselControls(index, total) {
+      document.getElementById("dashboard-model-carousel-prev").disabled = total <= 1;
+      document.getElementById("dashboard-model-carousel-next").disabled = total <= 1;
     }
 
     function renderDashboardCases(cases) {
@@ -1974,6 +2480,12 @@ _INDEX_HTML = """
       button.onclick = () => switchTab(button.dataset.tab);
     }
     document.getElementById("dashboard-refresh").onclick = loadDashboard;
+    document.getElementById("dashboard-model-carousel-prev").onclick = () => moveCarousel(-1);
+    document.getElementById("dashboard-model-carousel-next").onclick = () => moveCarousel(1);
+    for (const tab of document.querySelectorAll("[data-carousel-index]")) {
+      tab.onclick = () => goToCarouselPage(Number(tab.dataset.carouselIndex));
+    }
+    updateCarouselState();
     document.getElementById("dashboard-clear").onclick = () => {
       document.getElementById("dashboard_dataset").value = "J1";
       document.getElementById("dashboard_status").value = "all";

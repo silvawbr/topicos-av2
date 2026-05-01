@@ -94,6 +94,8 @@ def build_dashboard_payload(
     consistency_spearman = _judge_arbiter_spearman(scored_rows)
     critical_cases = _critical_cases(rows)
     divergence_cases = _divergence_cases(successful_rows)
+    ordinal_confusion = _ordinal_confusion_matrix(scored_rows, filters.dataset)
+    critical_error_analysis = _critical_error_analysis(rows, divergence_cases, filters.dataset)
 
     cards = {
         "evaluations": total_evaluations,
@@ -116,13 +118,20 @@ def build_dashboard_payload(
         "charts": {
             "candidate_ranking": _candidate_ranking(scored_rows),
             "score_distribution": _score_distribution(scored_rows),
+            "score_distribution_by_model": _score_distribution_by_model(scored_rows),
             "judge_average": _average_by(scored_rows, "judge_model"),
+            "reference_alignment": _reference_alignment_points(scored_rows, filters.dataset),
+            "ordinal_confusion": ordinal_confusion,
             "divergences": _divergence_chart(divergence_cases),
             "critical_cases": _critical_chart(critical_cases),
+            "critical_error_categories": critical_error_analysis["categories"],
+            "rubric_heatmap": _rubric_heatmap(scored_rows),
+            "legal_specialty_performance": _legal_specialty_performance(scored_rows),
         },
         "tables": {
             "critical_cases": critical_cases[:25],
             "divergence_cases": divergence_cases[:25],
+            "critical_error_analysis": critical_error_analysis["cases"][:40],
         },
         "methodology": {
             "primary_spearman": (
@@ -150,7 +159,13 @@ def spearman(xs: list[float], ys: list[float]) -> dict[str, Any]:
     rho = _pearson(ranked_x, ranked_y)
     if rho is None:
         return _spearman_unavailable(sample_size, "Variância insuficiente para Spearman.")
-    return {"value": round(rho, 4), "sample_size": sample_size, "available": True, "note": "Calculado com ranks médios para empates."}
+    return {
+        "value": round(rho, 4),
+        "p_value": _spearman_p_value(rho, sample_size),
+        "sample_size": sample_size,
+        "available": True,
+        "note": "Calculado com ranks médios para empates; p-value aproximado.",
+    }
 
 
 def _fetch_evaluation_rows(cursor: Any, filters: DashboardFilters) -> list[dict[str, Any]]:
@@ -169,6 +184,7 @@ def _fetch_evaluation_rows(cursor: Any, filters: DashboardFilters) -> list[dict[
             COALESCE(a.status_avaliacao, 'success') AS status,
             a.nota_atribuida,
             a.data_avaliacao,
+            a.chain_of_thought,
             r.texto_resposta,
             p.resposta_ouro,
             COALESCE(p.metadados, '{{}}'::jsonb),
@@ -197,10 +213,11 @@ def _fetch_evaluation_rows(cursor: Any, filters: DashboardFilters) -> list[dict[
             "status": row[7],
             "score": int(row[8]) if row[8] is not None else None,
             "evaluated_at": row[9].isoformat() if row[9] is not None else None,
-            "candidate_answer": row[10],
-            "reference_answer": row[11],
-            "metadata": row[12] if isinstance(row[12], dict) else {},
-            "trigger_reason": row[13],
+            "rationale": row[10],
+            "candidate_answer": row[11],
+            "reference_answer": row[12],
+            "metadata": row[13] if isinstance(row[13], dict) else {},
+            "trigger_reason": row[14],
         }
         for row in cursor.fetchall()
     ]
@@ -307,6 +324,136 @@ def _primary_spearman(rows: list[dict[str, Any]], selected_dataset: str) -> dict
     return _spearman_unavailable(0, "Selecione J1 ou J2 para Spearman principal sem misturar tarefas.")
 
 
+def _reference_alignment_points(rows: list[dict[str, Any]], selected_dataset: str) -> dict[str, Any]:
+    points = []
+    for row in rows:
+        reference_score = _reference_score(row, selected_dataset)
+        judge_score = row.get("score")
+        if reference_score is None or judge_score is None:
+            continue
+        points.append(
+            {
+                "evaluation_id": row["evaluation_id"],
+                "answer_id": row["answer_id"],
+                "question_id": row["question_id"],
+                "dataset": row["dataset"],
+                "candidate_model": row["candidate_model"],
+                "judge_model": row["judge_model"],
+                "reference_score": round(float(reference_score), 4),
+                "judge_score": int(judge_score),
+            }
+        )
+    return {
+        "points": points,
+        "x_label": "nota humana / score derivado do gabarito",
+        "y_label": "nota do juiz",
+    }
+
+
+def _ordinal_confusion_matrix(rows: list[dict[str, Any]], selected_dataset: str) -> dict[str, Any]:
+    labels = [1, 2, 3, 4, 5]
+    matrix = [[0 for _ in labels] for _ in labels]
+    total = 0
+    severe_false_positives = 0
+    false_negatives = 0
+    judge_score_counts = {score: 0 for score in labels}
+    important_cases: list[dict[str, Any]] = []
+
+    for row in rows:
+        reference_score = _ordinal_score(_reference_score(row, selected_dataset))
+        judge_score = _ordinal_score(row.get("score"))
+        if reference_score is None or judge_score is None:
+            continue
+        matrix[reference_score - 1][judge_score - 1] += 1
+        judge_score_counts[judge_score] += 1
+        total += 1
+        delta = judge_score - reference_score
+        if reference_score <= 2 and judge_score >= 4:
+            severe_false_positives += 1
+            important_cases.append(
+                _confusion_case(row, reference_score, judge_score, "falso positivo grave", delta)
+            )
+        elif reference_score >= 4 and judge_score <= 2:
+            false_negatives += 1
+            important_cases.append(_confusion_case(row, reference_score, judge_score, "falso negativo", delta))
+
+    lenient_total = judge_score_counts[4] + judge_score_counts[5]
+    conservative_total = judge_score_counts[2] + judge_score_counts[3]
+    lenient_share = _percent(lenient_total, total)
+    conservative_share = _percent(conservative_total, total)
+    highlights = [
+        {
+            "label": "Humano baixo, juiz alto",
+            "interpretation": "falso positivo grave",
+            "count": severe_false_positives,
+            "share": _percent(severe_false_positives, total),
+        },
+        {
+            "label": "Humano alto, juiz baixo",
+            "interpretation": "falso negativo",
+            "count": false_negatives,
+            "share": _percent(false_negatives, total),
+        },
+        {
+            "label": "Juiz nota 4/5",
+            "interpretation": "juiz leniente" if lenient_share is not None and lenient_share >= 60 else "tendencia a notas altas",
+            "count": lenient_total,
+            "share": lenient_share,
+        },
+        {
+            "label": "Juiz nota 2/3",
+            "interpretation": (
+                "juiz conservador demais"
+                if conservative_share is not None and conservative_share >= 60
+                else "tendencia a notas intermediarias/baixas"
+            ),
+            "count": conservative_total,
+            "share": conservative_share,
+        },
+    ]
+    return {
+        "rows": [f"Humano {score}" for score in labels],
+        "columns": [f"Juiz {score}" for score in labels],
+        "matrix": matrix,
+        "total": total,
+        "highlights": highlights,
+        "important_cases": sorted(important_cases, key=lambda case: (-abs(case["delta"]), case["answer_id"]))[:25],
+    }
+
+
+def _ordinal_score(value: Any) -> int | None:
+    try:
+        score = round(float(value))
+    except (TypeError, ValueError):
+        return None
+    if 1 <= score <= 5:
+        return int(score)
+    return None
+
+
+def _confusion_case(
+    row: dict[str, Any],
+    reference_score: int,
+    judge_score: int,
+    interpretation: str,
+    delta: int,
+) -> dict[str, Any]:
+    case = _case_row(row, reason=interpretation)
+    case["reference_score"] = reference_score
+    case["judge_score"] = judge_score
+    case["delta"] = delta
+    return case
+
+
+def _reference_score(row: dict[str, Any], selected_dataset: str) -> float | None:
+    dataset = row.get("dataset")
+    if selected_dataset.upper() == "J2" or dataset == "J2":
+        return _j2_reference_score(row)
+    if selected_dataset.upper() == "J1" or dataset == "J1":
+        return _j1_reference_score(row)
+    return None
+
+
 def _judge_arbiter_spearman(rows: list[dict[str, Any]]) -> dict[str, Any]:
     grouped: dict[int, dict[str, list[int]]] = defaultdict(lambda: {"judge": [], "arbiter": []})
     for row in rows:
@@ -366,6 +513,134 @@ def _score_distribution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{"label": str(score), "value": sum(1 for row in rows if row["score"] == score)} for score in range(1, 6)]
 
 
+def _score_distribution_by_model(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped = _group_scores(rows, "candidate_model")
+    result = []
+    for label, scores in grouped.items():
+        result.append(
+            {
+                "label": label,
+                "total": len(scores),
+                "average": round(statistics.mean(scores), 2),
+                "scores": {str(score): scores.count(score) for score in range(1, 6)},
+            }
+        )
+    return sorted(result, key=lambda row: (-row["average"], row["label"]))
+
+
+def _rubric_heatmap(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    dimensions = (
+        ("Argumentação", "argumentacao_score"),
+        ("Precisão", "precisao_score"),
+        ("Coesão legal", "coesao_legal_score"),
+        ("Total", "total_score"),
+    )
+    grouped: dict[str, dict[str, list[float]]] = defaultdict(lambda: {key: [] for _, key in dimensions})
+    for row in rows:
+        label = str(row.get("candidate_model") or "sem valor")
+        for _, key in dimensions:
+            value = _dimension_score(row, key)
+            if value is not None:
+                grouped[label][key].append(value)
+
+    heatmap_rows = []
+    for label, scores_by_dimension in grouped.items():
+        values = [
+            round(statistics.mean(values), 2) if values else None
+            for _, key in dimensions
+            for values in [scores_by_dimension[key]]
+        ]
+        heatmap_rows.append(
+            {
+                "label": label,
+                "values": values,
+                "count": max((len(values) for values in scores_by_dimension.values()), default=0),
+            }
+        )
+    return {
+        "columns": [label for label, _ in dimensions],
+        "rows": sorted(heatmap_rows, key=lambda row: (-(row["values"][-1] or 0), row["label"])),
+    }
+
+
+def _legal_specialty_performance(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    grouped: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+    models: set[str] = set()
+    for row in rows:
+        specialty = _legal_specialty(row)
+        model = str(row.get("candidate_model") or "sem modelo")
+        score = row.get("score")
+        if score is None:
+            continue
+        grouped[specialty][model].append(score)
+        models.add(model)
+
+    sorted_models = sorted(models)
+    specialty_rows = []
+    for specialty, scores_by_model in grouped.items():
+        values = [
+            round(statistics.mean(scores_by_model[model]), 2) if scores_by_model.get(model) else None
+            for model in sorted_models
+        ]
+        total_count = sum(len(scores) for scores in scores_by_model.values())
+        comparable_values = [value for value in values if value is not None]
+        specialty_rows.append(
+            {
+                "label": specialty,
+                "values": values,
+                "count": total_count,
+                "average": round(statistics.mean(comparable_values), 2) if comparable_values else None,
+            }
+        )
+    return {
+        "columns": sorted_models,
+        "rows": sorted(specialty_rows, key=lambda row: (-(row["average"] or 0), row["label"])),
+    }
+
+
+def _legal_specialty(row: dict[str, Any]) -> str:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    for key in ("legal_specialty", "especialidade", "disciplina", "area", "subject"):
+        value = metadata.get(key)
+        if value:
+            return _format_specialty(value)
+    category = metadata.get("category")
+    if category:
+        return _format_specialty(_strip_exam_prefix(str(category)))
+    return "Sem especialidade"
+
+
+def _strip_exam_prefix(value: str) -> str:
+    parts = value.split("_", 1)
+    return parts[1] if len(parts) == 2 and parts[0].isdigit() else value
+
+
+def _format_specialty(value: Any) -> str:
+    text = str(value).strip()
+    if not text:
+        return "Sem especialidade"
+    normalized = text.replace("-", "_").replace(" ", "_")
+    words = [word for word in normalized.split("_") if word]
+    return " ".join(word.capitalize() for word in words) if words else "Sem especialidade"
+
+
+def _dimension_score(row: dict[str, Any], key: str) -> float | None:
+    value = row.get(key)
+    if value is None and key == "total_score":
+        value = row.get("score")
+    if value is None:
+        criteria = row.get("criteria") if isinstance(row.get("criteria"), dict) else {}
+        value = criteria.get(key)
+    if value is None:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        value = metadata.get(key)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if 1 <= number <= 5 else None
+
+
 def _average_by(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     grouped = _group_scores(rows, key)
     return sorted(
@@ -413,6 +688,114 @@ def _critical_chart(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for case in cases:
         counts[case["reason"]] += 1
     return sorted([{"label": label, "value": value} for label, value in counts.items()], key=lambda row: (-row["value"], row["label"]))
+
+
+def _critical_error_analysis(
+    rows: list[dict[str, Any]],
+    divergence_cases: list[dict[str, Any]],
+    selected_dataset: str,
+) -> dict[str, list[dict[str, Any]]]:
+    category_order = [
+        "Nota alta para resposta errada",
+        "Nota baixa para resposta correta",
+        "Alucinacao normativa",
+        "Resposta sem fundamentacao",
+        "Divergencia entre juizes",
+        "Erro de parsing",
+        "Timeout/HTTP error",
+    ]
+    cases: list[dict[str, Any]] = []
+    seen: set[tuple[int | None, str, str]] = set()
+
+    def add_case(row: dict[str, Any], error_type: str, justification: str) -> None:
+        key = (row.get("evaluation_id"), error_type, row.get("judge_model") or "")
+        if key in seen:
+            return
+        seen.add(key)
+        cases.append(_critical_error_case(row, error_type, justification))
+
+    for row in rows:
+        reference_score = _ordinal_score(_reference_score(row, selected_dataset))
+        judge_score = _ordinal_score(row.get("score"))
+        if judge_score is not None and reference_score is not None:
+            if judge_score >= 4 and reference_score <= 2:
+                add_case(row, "Nota alta para resposta errada", f"referencia {reference_score}, juiz {judge_score}")
+            if judge_score <= 2 and reference_score >= 4:
+                add_case(row, "Nota baixa para resposta correta", f"referencia {reference_score}, juiz {judge_score}")
+        if _has_normative_hallucination(row):
+            add_case(row, "Alucinacao normativa", _short_justification(row, "indicio de norma inexistente ou fabricada"))
+        if _is_success(row) and row.get("score") is not None and not _has_legal_grounding(row):
+            add_case(row, "Resposta sem fundamentacao", _short_justification(row, "sem citacao legal identificavel"))
+        if row.get("score") is None:
+            add_case(row, "Erro de parsing", _short_justification(row, "nota nao extraivel"))
+        if _is_timeout_or_http_error(row):
+            add_case(row, "Timeout/HTTP error", _short_justification(row, str(row.get("status") or "falha operacional")))
+
+    rows_by_answer = {row.get("answer_id"): row for row in rows}
+    for divergence in divergence_cases:
+        base = rows_by_answer.get(divergence.get("answer_id"), divergence)
+        add_case(base, "Divergencia entre juizes", str(divergence.get("scores") or divergence.get("reason") or "delta >= 2"))
+
+    counts = {label: 0 for label in category_order}
+    for case in cases:
+        counts[case["error_type"]] = counts.get(case["error_type"], 0) + 1
+    categories = [{"label": label, "value": counts[label]} for label in category_order]
+    return {
+        "categories": categories,
+        "cases": sorted(cases, key=lambda row: (-counts.get(row["error_type"], 0), row["error_type"], row["question_id"], row["candidate_model"])),
+    }
+
+
+def _critical_error_case(row: dict[str, Any], error_type: str, justification: str) -> dict[str, Any]:
+    return {
+        "question_id": row.get("question_id"),
+        "candidate_model": row.get("candidate_model"),
+        "judge_model": row.get("judge_model"),
+        "score": row.get("score"),
+        "error_type": error_type,
+        "short_justification": justification,
+        "log_url": _log_url(row),
+    }
+
+
+def _has_normative_hallucination(row: dict[str, Any]) -> bool:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    for key in ("normative_hallucination", "hallucinated_norm", "invalid_legal_citation", "lei_inexistente"):
+        if metadata.get(key) is True:
+            return True
+    text = f"{row.get('rationale') or ''} {row.get('trigger_reason') or ''}".lower()
+    markers = ("lei inexistente", "artigo inexistente", "norma inexistente", "fundamento inexistente", "citação inexistente", "citacao inexistente", "alucina", "fabricad")
+    return any(marker in text for marker in markers)
+
+
+def _has_legal_grounding(row: dict[str, Any]) -> bool:
+    text = str(row.get("rationale") or "")
+    if not text.strip():
+        return False
+    legal_markers = ("art.", "artigo", "lei", "codigo", "código", "constituição", "constituicao", "cf", "cpp", "cpc", "cp", "clt", "sumula", "súmula")
+    return any(marker in text.lower() for marker in legal_markers)
+
+
+def _is_timeout_or_http_error(row: dict[str, Any]) -> bool:
+    text = f"{row.get('status') or ''} {row.get('rationale') or ''} {row.get('trigger_reason') or ''}".lower()
+    return "timeout" in text or "http" in text or "connection" in text
+
+
+def _short_justification(row: dict[str, Any], fallback: str) -> str:
+    text = str(row.get("rationale") or row.get("trigger_reason") or "").strip()
+    if not text:
+        return fallback
+    collapsed = " ".join(text.split())
+    return collapsed[:117] + "..." if len(collapsed) > 120 else collapsed
+
+
+def _log_url(row: dict[str, Any]) -> str | None:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    for key in ("log_url", "audit_log_url"):
+        value = metadata.get(key) or row.get(key)
+        if value:
+            return str(value)
+    return None
 
 
 def _case_row(row: dict[str, Any], *, reason: str) -> dict[str, Any]:
@@ -465,8 +848,18 @@ def _pearson(xs: list[float], ys: list[float]) -> float | None:
     return numerator / denominator
 
 
+def _spearman_p_value(rho: float, sample_size: int) -> float | None:
+    if sample_size <= 2:
+        return None
+    if abs(rho) >= 1:
+        return 0.0
+    t_value = abs(rho) * math.sqrt((sample_size - 2) / (1 - rho**2))
+    p_value = math.erfc(t_value / math.sqrt(2))
+    return round(max(0.0, min(1.0, p_value)), 6)
+
+
 def _spearman_unavailable(sample_size: int, note: str) -> dict[str, Any]:
-    return {"value": None, "sample_size": sample_size, "available": False, "note": note}
+    return {"value": None, "p_value": None, "sample_size": sample_size, "available": False, "note": note}
 
 
 def _serialize_filters(filters: DashboardFilters) -> dict[str, Any]:
