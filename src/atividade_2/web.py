@@ -726,6 +726,35 @@ _INDEX_HTML = """
     .chart-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px,1fr)); gap:14px; }
     .chart { border:1px solid var(--line); border-radius:8px; padding:12px; min-width:0; }
     .chart h3 { margin:0 0 10px; font-size:13px; }
+    .carousel-card { border:1px solid #b9d5eb; border-radius:8px; padding:12px; margin:0 0 14px; background:#fff; overflow:hidden; box-shadow:0 8px 22px rgba(23,105,170,.08); }
+    .carousel-head { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; padding-bottom:10px; border-bottom:1px solid var(--line); }
+    .carousel-controls { display:flex; align-items:center; gap:8px; }
+    .carousel-button { width:38px; min-height:34px; padding:0; border-color:#b9d5eb; background:#f2f8fd; color:var(--accent); font-size:20px; line-height:1; }
+    .carousel-tabs { display:flex; align-items:center; gap:6px; min-width:0; overflow:auto; }
+    .carousel-tab { min-height:36px; padding:0 12px; border-color:var(--line); background:#fff; color:var(--muted); font-size:13px; font-weight:750; white-space:nowrap; }
+    .carousel-tab.active { border-color:var(--accent); background:var(--accent); color:#fff; box-shadow:0 6px 14px rgba(23,105,170,.24); }
+    .carousel-viewport { width:100%; overflow:hidden; touch-action:pan-y; }
+    .carousel-track { display:flex; gap:0; width:100%; transform:translateX(0); transition:transform .24s ease; }
+    .dashboard-carousel-slide { flex:0 0 100%; width:100%; min-width:100%; padding:2px; }
+    .dashboard-carousel-slide h3 { margin:0 0 10px; font-size:13px; }
+    .dashboard-carousel-slide .metric-grid { margin-bottom:0; }
+    .model-distribution-list { display:grid; gap:10px; }
+    .model-distribution-card { border:1px solid var(--line); border-radius:8px; padding:12px; background:#fbfcfe; }
+    .model-card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:10px; }
+    .model-card-title { min-width:0; font-weight:750; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .model-card-meta { color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .stacked-bar { display:flex; height:18px; border-radius:999px; overflow:hidden; background:#e5e9f0; box-shadow:inset 0 0 0 1px rgba(24,33,47,.04); }
+    .stacked-segment { min-width:0; transition:width .24s ease; }
+    .stacked-segment.score-1 { background:#b42318; }
+    .stacked-segment.score-2 { background:#d97706; }
+    .stacked-segment.score-3 { background:#1769aa; }
+    .stacked-segment.score-4 { background:#1d7f4e; }
+    .stacked-segment.score-5 { background:#0f766e; }
+    .score-legend { display:grid; grid-template-columns:repeat(5, minmax(72px,1fr)); gap:6px; margin-top:10px; overflow:auto; padding-bottom:2px; }
+    .score-chip { display:flex; justify-content:space-between; align-items:center; gap:4px; min-width:0; border:1px solid var(--line); border-radius:6px; padding:5px 6px; color:var(--muted); font-size:12px; }
+    .score-swatch { width:8px; height:8px; border-radius:999px; flex:0 0 auto; }
+    .score-chip strong { color:var(--ink); font-variant-numeric:tabular-nums; }
+    .carousel-empty { width:100%; }
     .bar-row { display:grid; grid-template-columns:minmax(82px,132px) minmax(88px,1fr) 104px; gap:8px; align-items:center; margin:7px 0; font-size:12px; }
     .bar-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
     .bar-track { height:14px; border-radius:999px; background:#e5e9f0; overflow:hidden; box-shadow:inset 0 0 0 1px rgba(24,33,47,.03); }
@@ -824,30 +853,53 @@ _INDEX_HTML = """
           <span id="database-dump-status" class="status"></span>
         </div>
       </div>
-      <div id="dashboard-cards" class="metric-grid"></div>
-      <div class="chart-grid">
-        <div class="chart">
-          <h3>Ranking geral dos modelos candidatos</h3>
-          <div id="dashboard-candidate-ranking"></div>
+      <div class="carousel-card" aria-label="Resumo do dashboard">
+        <div class="carousel-head">
+          <div id="dashboard-model-carousel-dots" class="carousel-tabs" role="tablist" aria-label="Paginas do dashboard">
+            <button class="carousel-tab active" type="button" data-carousel-index="0" role="tab" aria-selected="true">Indicadores gerais</button>
+            <button class="carousel-tab" type="button" data-carousel-index="1" role="tab" aria-selected="false">Distribuicao das notas por modelo</button>
+          </div>
+          <div class="carousel-controls" aria-label="Navegacao do carousel">
+            <button id="dashboard-model-carousel-prev" class="carousel-button" type="button" aria-label="Pagina anterior">&lsaquo;</button>
+            <button id="dashboard-model-carousel-next" class="carousel-button" type="button" aria-label="Proxima pagina">&rsaquo;</button>
+          </div>
         </div>
-        <div class="chart">
-          <h3>Distribuicao de notas 1-5</h3>
-          <div id="dashboard-score-distribution"></div>
-        </div>
-        <div class="chart">
-          <h3>Media por juiz</h3>
-          <div id="dashboard-judge-average"></div>
-        </div>
-        <div class="chart">
-          <h3>Divergencias para auditoria</h3>
-          <div id="dashboard-divergences"></div>
-        </div>
-        <div class="chart">
-          <h3>Casos criticos</h3>
-          <div id="dashboard-critical-chart"></div>
+        <div class="carousel-viewport">
+          <div id="dashboard-model-distribution-carousel" class="carousel-track">
+            <div class="dashboard-carousel-slide">
+              <h3>Indicadores gerais</h3>
+              <div id="dashboard-cards" class="metric-grid"></div>
+              <div class="chart-grid">
+                <div class="chart">
+                  <h3>Ranking geral dos modelos candidatos</h3>
+                  <div id="dashboard-candidate-ranking"></div>
+                </div>
+                <div class="chart">
+                  <h3>Distribuicao de notas 1-5</h3>
+                  <div id="dashboard-score-distribution"></div>
+                </div>
+                <div class="chart">
+                  <h3>Media por juiz</h3>
+                  <div id="dashboard-judge-average"></div>
+                </div>
+                <div class="chart">
+                  <h3>Divergencias para auditoria</h3>
+                  <div id="dashboard-divergences"></div>
+                </div>
+                <div class="chart">
+                  <h3>Casos criticos</h3>
+                  <div id="dashboard-critical-chart"></div>
+                </div>
+              </div>
+              <p id="dashboard-methodology" class="dashboard-note"></p>
+            </div>
+            <div class="dashboard-carousel-slide">
+              <h3>Distribuicao das notas por modelo</h3>
+              <div id="dashboard-model-distribution-chart" class="model-distribution-list"></div>
+            </div>
+          </div>
         </div>
       </div>
-      <p id="dashboard-methodology" class="dashboard-note"></p>
       <h2 style="margin-top:18px">Casos criticos e divergencias</h2>
       <div class="table-wrap dashboard-table">
         <table aria-label="Casos criticos do dashboard">
@@ -1229,6 +1281,7 @@ _INDEX_HTML = """
       populateSelect("dashboard_candidate_model", data.options?.candidate_models || [], selectedValues("dashboard_candidate_model"));
       populateSelect("dashboard_judge_model", data.options?.judge_models || [], selectedValues("dashboard_judge_model"));
       renderDashboardCards(data.cards || {});
+      renderModelDistributionChart(data.charts?.score_distribution_by_model || []);
       renderBarChart("dashboard-candidate-ranking", data.charts?.candidate_ranking || [], {scaleMax: 5});
       renderBarChart("dashboard-score-distribution", data.charts?.score_distribution || [], {scaleMax: 1, showPercent: true, colorByLabel: true});
       renderBarChart("dashboard-judge-average", data.charts?.judge_average || [], {scaleMax: 5});
@@ -1285,6 +1338,109 @@ _INDEX_HTML = """
         }
         root.appendChild(card);
       }
+    }
+
+    function renderModelDistributionChart(rows) {
+      const root = document.getElementById("dashboard-model-distribution-chart");
+      root.textContent = "";
+      if (!rows.length) {
+        const empty = document.createElement("div");
+        empty.className = "muted carousel-empty";
+        empty.textContent = "Sem dados por modelo.";
+        root.appendChild(empty);
+        return;
+      }
+      rows.forEach((row) => {
+        const card = document.createElement("div");
+        card.className = "model-distribution-card";
+        const head = document.createElement("div");
+        head.className = "model-card-head";
+        const title = document.createElement("div");
+        title.className = "model-card-title";
+        title.title = row.label;
+        title.textContent = row.label;
+        const meta = document.createElement("div");
+        meta.className = "model-card-meta";
+        meta.textContent = `media ${formatAverage(row.average)} - n=${display(row.total)}`;
+        head.appendChild(title);
+        head.appendChild(meta);
+        card.appendChild(head);
+        card.appendChild(stackedScoreBar(row));
+        card.appendChild(scoreLegend(row));
+        root.appendChild(card);
+      });
+    }
+
+    function stackedScoreBar(row) {
+      const total = Number(row.total) || 0;
+      const bar = document.createElement("div");
+      bar.className = "stacked-bar";
+      for (const score of ["1", "2", "3", "4", "5"]) {
+        const value = Number(row.scores?.[score]) || 0;
+        const segment = document.createElement("span");
+        segment.className = `stacked-segment score-${score}`;
+        segment.title = `Nota ${score}: ${value}`;
+        segment.style.width = `${total ? (value / total) * 100 : 0}%`;
+        bar.appendChild(segment);
+      }
+      return bar;
+    }
+
+    function scoreLegend(row) {
+      const legend = document.createElement("div");
+      legend.className = "score-legend";
+      for (const score of ["1", "2", "3", "4", "5"]) {
+        const chip = document.createElement("span");
+        chip.className = "score-chip";
+        const label = document.createElement("span");
+        const swatch = document.createElement("span");
+        swatch.className = `score-swatch stacked-segment score-${score}`;
+        label.appendChild(swatch);
+        label.appendChild(document.createTextNode(` ${score}`));
+        const value = document.createElement("strong");
+        value.textContent = String(Number(row.scores?.[score]) || 0);
+        chip.appendChild(label);
+        chip.appendChild(value);
+        legend.appendChild(chip);
+      }
+      return legend;
+    }
+
+    let dashboardCarouselIndex = 0;
+
+    function moveCarousel(delta) {
+      const track = document.getElementById("dashboard-model-distribution-carousel");
+      const cards = Array.from(track.querySelectorAll(".dashboard-carousel-slide"));
+      if (!cards.length) return;
+      const nextIndex = (dashboardCarouselIndex + delta + cards.length) % cards.length;
+      goToCarouselPage(nextIndex);
+    }
+
+    function goToCarouselPage(index) {
+      const track = document.getElementById("dashboard-model-distribution-carousel");
+      const cards = Array.from(track.querySelectorAll(".dashboard-carousel-slide"));
+      if (!cards.length) return;
+      const nextIndex = (index + cards.length) % cards.length;
+      dashboardCarouselIndex = nextIndex;
+      track.style.transform = `translateX(-${nextIndex * 100}%)`;
+      updateCarouselState();
+    }
+
+    function updateCarouselState() {
+      const track = document.getElementById("dashboard-model-distribution-carousel");
+      const cards = Array.from(track.querySelectorAll(".dashboard-carousel-slide"));
+      const index = dashboardCarouselIndex;
+      cards.forEach((card, cardIndex) => card.classList.toggle("active", cardIndex === index));
+      for (const [tabIndex, tab] of Array.from(document.getElementById("dashboard-model-carousel-dots").children).entries()) {
+        tab.classList.toggle("active", tabIndex === index);
+        tab.setAttribute("aria-selected", String(tabIndex === index));
+      }
+      updateCarouselControls(index, cards.length);
+    }
+
+    function updateCarouselControls(index, total) {
+      document.getElementById("dashboard-model-carousel-prev").disabled = total <= 1;
+      document.getElementById("dashboard-model-carousel-next").disabled = total <= 1;
     }
 
     function renderDashboardCases(cases) {
@@ -1974,6 +2130,12 @@ _INDEX_HTML = """
       button.onclick = () => switchTab(button.dataset.tab);
     }
     document.getElementById("dashboard-refresh").onclick = loadDashboard;
+    document.getElementById("dashboard-model-carousel-prev").onclick = () => moveCarousel(-1);
+    document.getElementById("dashboard-model-carousel-next").onclick = () => moveCarousel(1);
+    for (const tab of document.querySelectorAll("[data-carousel-index]")) {
+      tab.onclick = () => goToCarouselPage(Number(tab.dataset.carouselIndex));
+    }
+    updateCarouselState();
     document.getElementById("dashboard-clear").onclick = () => {
       document.getElementById("dashboard_dataset").value = "J1";
       document.getElementById("dashboard_status").value = "all";

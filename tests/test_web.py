@@ -185,6 +185,9 @@ class FakeDashboardService:
             "charts": {
                 "candidate_ranking": [{"label": "modelo-candidato", "value": 4.25}],
                 "score_distribution": [{"label": str(score), "value": 1 if score == 5 else 0} for score in range(1, 6)],
+                "score_distribution_by_model": [
+                    {"label": "modelo-candidato", "total": 4, "average": 4.25, "scores": {"1": 1, "2": 0, "3": 0, "4": 0, "5": 3}}
+                ],
                 "judge_average": [{"label": "openai/gpt-oss-120b", "value": 4.25}],
                 "divergences": [{"label": "modelo-candidato", "value": 1}],
                 "critical_cases": [{"label": "nota 1", "value": 1}],
@@ -278,6 +281,17 @@ def test_web_index_contains_progress_element() -> None:
     assert 'id="judge-failures-chart"' in response.text
     assert 'id="candidate-average-chart"' in response.text
     assert 'id="judge-average-chart"' in response.text
+    assert 'id="dashboard-model-distribution-carousel"' in response.text
+    assert 'id="dashboard-model-distribution-chart"' in response.text
+    assert "Indicadores gerais" in response.text
+    assert 'data-carousel-index="0"' in response.text
+    assert 'data-carousel-index="1"' in response.text
+    assert "function renderModelDistributionChart" in response.text
+    assert "function moveCarousel" in response.text
+    assert "function goToCarouselPage" in response.text
+    assert "(dashboardCarouselIndex + delta + cards.length) % cards.length" in response.text
+    assert "track.style.transform" in response.text
+    assert "score_distribution_by_model" in response.text
     assert "function buildPostRunStats" in response.text
     assert "function renderPostRunPanel" in response.text
     assert "showPercent: true" in response.text

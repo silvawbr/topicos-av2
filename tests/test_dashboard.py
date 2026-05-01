@@ -105,3 +105,20 @@ def test_dashboard_reports_judge_arbiter_as_complementary_consistency() -> None:
     assert consistency["available"] is True
     assert consistency["value"] == 1.0
     assert "Meta-avaliação" in consistency["note"]
+
+
+def test_dashboard_reports_score_distribution_by_candidate_model() -> None:
+    rows = [
+        _row(evaluation_id=1, answer_id=1, dataset="J1", candidate_answer="texto", reference_answer="rubrica", score=1, candidate_model="modelo-a"),
+        _row(evaluation_id=2, answer_id=2, dataset="J1", candidate_answer="texto", reference_answer="rubrica", score=5, candidate_model="modelo-a"),
+        _row(evaluation_id=3, answer_id=3, dataset="J1", candidate_answer="texto", reference_answer="rubrica", score=4, candidate_model="modelo-a"),
+        _row(evaluation_id=4, answer_id=4, dataset="J1", candidate_answer="texto", reference_answer="rubrica", score=3, candidate_model="modelo-b"),
+        _row(evaluation_id=5, answer_id=5, dataset="J1", candidate_answer="texto", reference_answer="rubrica", score=3, candidate_model="modelo-b"),
+    ]
+
+    payload = build_dashboard_payload(rows, expected_answers=5, filters=DashboardFilters(dataset="J1"))
+
+    assert payload["charts"]["score_distribution_by_model"] == [
+        {"label": "modelo-a", "total": 3, "average": 3.33, "scores": {"1": 1, "2": 0, "3": 0, "4": 1, "5": 1}},
+        {"label": "modelo-b", "total": 2, "average": 3, "scores": {"1": 0, "2": 0, "3": 2, "4": 0, "5": 0}},
+    ]

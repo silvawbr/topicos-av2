@@ -116,6 +116,7 @@ def build_dashboard_payload(
         "charts": {
             "candidate_ranking": _candidate_ranking(scored_rows),
             "score_distribution": _score_distribution(scored_rows),
+            "score_distribution_by_model": _score_distribution_by_model(scored_rows),
             "judge_average": _average_by(scored_rows, "judge_model"),
             "divergences": _divergence_chart(divergence_cases),
             "critical_cases": _critical_chart(critical_cases),
@@ -364,6 +365,21 @@ def _candidate_ranking(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _score_distribution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{"label": str(score), "value": sum(1 for row in rows if row["score"] == score)} for score in range(1, 6)]
+
+
+def _score_distribution_by_model(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped = _group_scores(rows, "candidate_model")
+    result = []
+    for label, scores in grouped.items():
+        result.append(
+            {
+                "label": label,
+                "total": len(scores),
+                "average": round(statistics.mean(scores), 2),
+                "scores": {str(score): scores.count(score) for score in range(1, 6)},
+            }
+        )
+    return sorted(result, key=lambda row: (-row["average"], row["label"]))
 
 
 def _average_by(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
