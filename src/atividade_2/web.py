@@ -881,7 +881,8 @@ _INDEX_HTML = """
             <button class="carousel-tab" type="button" data-carousel-index="2" role="tab" aria-selected="false">Juiz x referencia</button>
             <button class="carousel-tab" type="button" data-carousel-index="3" role="tab" aria-selected="false">Matriz concordancia</button>
             <button class="carousel-tab" type="button" data-carousel-index="4" role="tab" aria-selected="false">Heatmap rubrica</button>
-            <button class="carousel-tab" type="button" data-carousel-index="5" role="tab" aria-selected="false">Erros criticos</button>
+            <button class="carousel-tab" type="button" data-carousel-index="5" role="tab" aria-selected="false">Especialidades juridicas</button>
+            <button class="carousel-tab" type="button" data-carousel-index="6" role="tab" aria-selected="false">Erros criticos</button>
           </div>
           <div class="carousel-controls" aria-label="Navegacao do carousel">
             <button id="dashboard-model-carousel-prev" class="carousel-button" type="button" aria-label="Pagina anterior">&lsaquo;</button>
@@ -953,6 +954,10 @@ _INDEX_HTML = """
             <div class="dashboard-carousel-slide">
               <h3>Heatmap modelo x dimensao da rubrica</h3>
               <div id="dashboard-rubric-heatmap" class="heatmap-wrap"></div>
+            </div>
+            <div class="dashboard-carousel-slide">
+              <h3>Desempenho por especialidade juridica</h3>
+              <div id="dashboard-legal-specialty-performance" class="heatmap-wrap"></div>
             </div>
             <div class="dashboard-carousel-slide">
               <h3>Analise de erros criticos</h3>
@@ -1346,6 +1351,7 @@ _INDEX_HTML = """
       renderReferenceScatter(data.charts?.reference_alignment || {}, data.cards?.spearman_reference || {});
       renderOrdinalConfusion(data.charts?.ordinal_confusion || {});
       renderRubricHeatmap(data.charts?.rubric_heatmap || {});
+      renderLegalSpecialtyPerformance(data.charts?.legal_specialty_performance || {});
       renderCriticalErrorAnalysis(data.charts?.critical_error_categories || [], data.tables?.critical_error_analysis || []);
       renderBarChart("dashboard-candidate-ranking", data.charts?.candidate_ranking || [], {scaleMax: 5});
       renderBarChart("dashboard-score-distribution", data.charts?.score_distribution || [], {scaleMax: 1, showPercent: true, colorByLabel: true});
@@ -1496,6 +1502,38 @@ _INDEX_HTML = """
           cell.title = `${row.label} - n=${display(row.count)}`;
           grid.appendChild(cell);
         });
+      });
+      root.appendChild(grid);
+    }
+
+    function renderLegalSpecialtyPerformance(heatmap) {
+      const root = document.getElementById("dashboard-legal-specialty-performance");
+      root.textContent = "";
+      const columns = heatmap.columns || [];
+      const rows = heatmap.rows || [];
+      if (!columns.length || !rows.length) {
+        const empty = document.createElement("div");
+        empty.className = "muted carousel-empty";
+        empty.textContent = "Sem especialidades juridicas para o filtro atual.";
+        root.appendChild(empty);
+        return;
+      }
+      const grid = document.createElement("div");
+      grid.className = "heatmap-grid";
+      grid.style.gridTemplateColumns = `minmax(180px, 1.3fr) repeat(${columns.length}, minmax(112px, 1fr)) minmax(70px, .55fr)`;
+      grid.appendChild(heatmapCell("Especialidade", "heatmap-head"));
+      columns.forEach((column) => grid.appendChild(heatmapCell(column, "heatmap-head")));
+      grid.appendChild(heatmapCell("n", "heatmap-head"));
+      rows.forEach((row) => {
+        grid.appendChild(heatmapCell(row.label, "heatmap-model"));
+        (row.values || []).forEach((value, index) => {
+          const model = columns[index] || "modelo";
+          const cell = heatmapCell(value == null ? "-" : formatAverage(value), "heatmap-value");
+          cell.style.background = heatmapColor(value);
+          cell.title = `${row.label} | ${model} | media ${display(value)} | n=${display(row.count)}`;
+          grid.appendChild(cell);
+        });
+        grid.appendChild(heatmapCell(display(row.count), "heatmap-head"));
       });
       root.appendChild(grid);
     }

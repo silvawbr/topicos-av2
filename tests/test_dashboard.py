@@ -207,6 +207,37 @@ def test_dashboard_reports_rubric_dimension_heatmap_by_candidate_model() -> None
     }
 
 
+def test_dashboard_reports_candidate_average_by_legal_specialty() -> None:
+    rows = [
+        {
+            **_row(evaluation_id=1, answer_id=1, dataset="J1", candidate_answer="texto", reference_answer="rubrica", score=5, candidate_model="modelo-a"),
+            "metadata": {"category": "39_direito_administrativo"},
+        },
+        {
+            **_row(evaluation_id=2, answer_id=2, dataset="J1", candidate_answer="texto", reference_answer="rubrica", score=3, candidate_model="modelo-a"),
+            "metadata": {"category": "39_direito_administrativo"},
+        },
+        {
+            **_row(evaluation_id=3, answer_id=3, dataset="J1", candidate_answer="texto", reference_answer="rubrica", score=4, candidate_model="modelo-b"),
+            "metadata": {"category": "39_direito_administrativo"},
+        },
+        {
+            **_row(evaluation_id=4, answer_id=4, dataset="J1", candidate_answer="texto", reference_answer="rubrica", score=2, candidate_model="modelo-a"),
+            "metadata": {"especialidade": "direito tributario"},
+        },
+    ]
+
+    payload = build_dashboard_payload(rows, expected_answers=4, filters=DashboardFilters(dataset="J1"))
+
+    assert payload["charts"]["legal_specialty_performance"] == {
+        "columns": ["modelo-a", "modelo-b"],
+        "rows": [
+            {"label": "Direito Administrativo", "values": [4.0, 4.0], "count": 3, "average": 4.0},
+            {"label": "Direito Tributario", "values": [2.0, None], "count": 1, "average": 2.0},
+        ],
+    }
+
+
 def test_dashboard_reports_ordinal_confusion_matrix_and_error_highlights() -> None:
     rows = [
         _row(evaluation_id=1, answer_id=1, dataset="J2", candidate_answer="B", reference_answer="B", score=5),

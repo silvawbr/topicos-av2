@@ -126,6 +126,7 @@ def build_dashboard_payload(
             "critical_cases": _critical_chart(critical_cases),
             "critical_error_categories": critical_error_analysis["categories"],
             "rubric_heatmap": _rubric_heatmap(scored_rows),
+            "legal_specialty_performance": _legal_specialty_performance(scored_rows),
         },
         "tables": {
             "critical_cases": critical_cases[:25],
@@ -560,6 +561,67 @@ def _rubric_heatmap(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "columns": [label for label, _ in dimensions],
         "rows": sorted(heatmap_rows, key=lambda row: (-(row["values"][-1] or 0), row["label"])),
     }
+
+
+def _legal_specialty_performance(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    grouped: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+    models: set[str] = set()
+    for row in rows:
+        specialty = _legal_specialty(row)
+        model = str(row.get("candidate_model") or "sem modelo")
+        score = row.get("score")
+        if score is None:
+            continue
+        grouped[specialty][model].append(score)
+        models.add(model)
+
+    sorted_models = sorted(models)
+    specialty_rows = []
+    for specialty, scores_by_model in grouped.items():
+        values = [
+            round(statistics.mean(scores_by_model[model]), 2) if scores_by_model.get(model) else None
+            for model in sorted_models
+        ]
+        total_count = sum(len(scores) for scores in scores_by_model.values())
+        comparable_values = [value for value in values if value is not None]
+        specialty_rows.append(
+            {
+                "label": specialty,
+                "values": values,
+                "count": total_count,
+                "average": round(statistics.mean(comparable_values), 2) if comparable_values else None,
+            }
+        )
+    return {
+        "columns": sorted_models,
+        "rows": sorted(specialty_rows, key=lambda row: (-(row["average"] or 0), row["label"])),
+    }
+
+
+def _legal_specialty(row: dict[str, Any]) -> str:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    for key in ("legal_specialty", "especialidade", "disciplina", "area", "subject"):
+        value = metadata.get(key)
+        if value:
+            return _format_specialty(value)
+    category = metadata.get("category")
+    if category:
+        return _format_specialty(_strip_exam_prefix(str(category)))
+    return "Sem especialidade"
+
+
+def _strip_exam_prefix(value: str) -> str:
+    parts = value.split("_", 1)
+    return parts[1] if len(parts) == 2 and parts[0].isdigit() else value
+
+
+def _format_specialty(value: Any) -> str:
+    text = str(value).strip()
+    if not text:
+        return "Sem especialidade"
+    normalized = text.replace("-", "_").replace(" ", "_")
+    words = [word for word in normalized.split("_") if word]
+    return " ".join(word.capitalize() for word in words) if words else "Sem especialidade"
 
 
 def _dimension_score(row: dict[str, Any], key: str) -> float | None:

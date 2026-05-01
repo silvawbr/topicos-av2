@@ -243,6 +243,10 @@ class FakeDashboardService:
                     "columns": ["Argumentação", "Precisão", "Coesão legal", "Total"],
                     "rows": [{"label": "modelo-candidato", "values": [4.4, 4.1, 4.2, 4.25], "count": 4}],
                 },
+                "legal_specialty_performance": {
+                    "columns": ["modelo-candidato"],
+                    "rows": [{"label": "Direito Administrativo", "values": [4.25], "count": 4, "average": 4.25}],
+                },
             },
             "tables": {
                 "critical_cases": [
@@ -355,12 +359,15 @@ def test_web_index_contains_progress_element() -> None:
     assert 'data-carousel-index="3"' in response.text
     assert 'data-carousel-index="4"' in response.text
     assert 'data-carousel-index="5"' in response.text
+    assert 'data-carousel-index="6"' in response.text
     assert "Correlacao juiz x referencia humana/gabarito" in response.text
     assert 'id="dashboard-reference-scatter"' in response.text
     assert "Matriz de concordancia / divergencia" in response.text
     assert 'id="dashboard-ordinal-confusion"' in response.text
     assert "Heatmap modelo x dimensao da rubrica" in response.text
     assert 'id="dashboard-rubric-heatmap"' in response.text
+    assert "Desempenho por especialidade juridica" in response.text
+    assert 'id="dashboard-legal-specialty-performance"' in response.text
     assert "Analise de erros criticos" in response.text
     assert "Categorias de erro" in response.text
     assert 'id="dashboard-critical-error-chart"' in response.text
@@ -372,6 +379,7 @@ def test_web_index_contains_progress_element() -> None:
     assert "rho Spearman" in response.text
     assert "p-value" in response.text
     assert "function renderRubricHeatmap" in response.text
+    assert "function renderLegalSpecialtyPerformance" in response.text
     assert "function renderCriticalErrorAnalysis" in response.text
     assert "function moveCarousel" in response.text
     assert "function goToCarouselPage" in response.text
@@ -381,6 +389,7 @@ def test_web_index_contains_progress_element() -> None:
     assert "reference_alignment" in response.text
     assert "ordinal_confusion" in response.text
     assert "rubric_heatmap" in response.text
+    assert "legal_specialty_performance" in response.text
     assert "critical_error_categories" in response.text
     assert "critical_error_analysis" in response.text
     assert "function buildPostRunStats" in response.text
