@@ -383,6 +383,18 @@ def test_web_index_contains_progress_element() -> None:
     assert "function renderCriticalErrorAnalysis" in response.text
     assert "function moveCarousel" in response.text
     assert "function goToCarouselPage" in response.text
+    assert "function scrollCarouselTabsIntoView" in response.text
+    assert ".carousel-tabs { flex:1 1 auto;" in response.text
+    assert ".carousel-controls { flex:0 0 auto;" in response.text
+    assert "if (index <= 1)" in response.text
+    assert "Math.max(0, index - 1)" in response.text
+    assert "Math.min(tabs.length - 1, index + 1)" in response.text
+    assert "const maxScrollLeft = Math.max(0, root.scrollWidth - root.clientWidth)" in response.text
+    assert "scroll-padding-left:8px" in response.text
+    assert 'activeTab.scrollIntoView({behavior: "smooth", block: "nearest", inline: "start"})' in response.text
+    assert "Math.min(maxScrollLeft, Math.max(0, desiredLeft))" in response.text
+    assert "function resetCarouselTabsScroll" in response.text
+    assert "requestAnimationFrame(resetCarouselTabsScroll)" in response.text
     assert "(dashboardCarouselIndex + delta + cards.length) % cards.length" in response.text
     assert "track.style.transform" in response.text
     assert "score_distribution_by_model" in response.text

@@ -727,11 +727,11 @@ _INDEX_HTML = """
     .chart { border:1px solid var(--line); border-radius:8px; padding:12px; min-width:0; }
     .chart h3 { margin:0 0 10px; font-size:13px; }
     .carousel-card { border:1px solid #b9d5eb; border-radius:8px; padding:12px; margin:0 0 14px; background:#fff; overflow:hidden; box-shadow:0 8px 22px rgba(23,105,170,.08); }
-    .carousel-head { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; padding-bottom:10px; border-bottom:1px solid var(--line); }
-    .carousel-controls { display:flex; align-items:center; gap:8px; }
+    .carousel-head { display:flex; justify-content:space-between; align-items:center; gap:12px; min-width:0; margin-bottom:12px; padding-bottom:10px; border-bottom:1px solid var(--line); }
+    .carousel-controls { flex:0 0 auto; display:flex; align-items:center; gap:8px; }
     .carousel-button { width:38px; min-height:34px; padding:0; border-color:#b9d5eb; background:#f2f8fd; color:var(--accent); font-size:20px; line-height:1; }
-    .carousel-tabs { display:flex; align-items:center; gap:6px; min-width:0; overflow:auto; }
-    .carousel-tab { min-height:36px; padding:0 12px; border-color:var(--line); background:#fff; color:var(--muted); font-size:13px; font-weight:750; white-space:nowrap; }
+    .carousel-tabs { flex:1 1 auto; display:flex; align-items:center; gap:6px; min-width:0; max-width:100%; overflow-x:auto; overflow-y:hidden; scroll-behavior:smooth; scroll-padding-left:8px; scroll-padding-right:8px; scrollbar-width:thin; }
+    .carousel-tab { flex:0 0 auto; min-height:36px; padding:0 12px; border-color:var(--line); background:#fff; color:var(--muted); font-size:13px; font-weight:750; white-space:nowrap; }
     .carousel-tab.active { border-color:var(--accent); background:var(--accent); color:#fff; box-shadow:0 6px 14px rgba(23,105,170,.24); }
     .carousel-viewport { width:100%; overflow:hidden; touch-action:pan-y; }
     .carousel-track { display:flex; gap:0; width:100%; transform:translateX(0); transition:transform .24s ease; }
@@ -1785,7 +1785,40 @@ _INDEX_HTML = """
         tab.classList.toggle("active", tabIndex === index);
         tab.setAttribute("aria-selected", String(tabIndex === index));
       }
+      scrollCarouselTabsIntoView(index);
       updateCarouselControls(index, cards.length);
+    }
+
+    function scrollCarouselTabsIntoView(index) {
+      const root = document.getElementById("dashboard-model-carousel-dots");
+      const tabs = Array.from(root.children);
+      if (!tabs.length || root.scrollWidth <= root.clientWidth) return;
+      if (index <= 1) {
+        root.scrollTo({left: 0, behavior: "auto"});
+        return;
+      }
+      const firstVisibleIndex = Math.max(0, index - 1);
+      const lastVisibleIndex = Math.min(tabs.length - 1, index + 1);
+      const activeTab = tabs[index];
+      const firstTab = tabs[firstVisibleIndex];
+      const lastTab = tabs[lastVisibleIndex];
+      const padding = 8;
+      const targetLeft = firstTab.offsetLeft - padding;
+      const targetRight = lastTab.offsetLeft + lastTab.offsetWidth + padding;
+      const targetSpan = targetRight - targetLeft;
+      const maxScrollLeft = Math.max(0, root.scrollWidth - root.clientWidth);
+      let desiredLeft = targetLeft - Math.max(0, root.clientWidth - targetSpan) / 2;
+      if (targetSpan > root.clientWidth) {
+        activeTab.scrollIntoView({behavior: "smooth", block: "nearest", inline: "start"});
+        return;
+      }
+      root.scrollTo({left: Math.min(maxScrollLeft, Math.max(0, desiredLeft)), behavior: "smooth"});
+    }
+
+    function resetCarouselTabsScroll() {
+      const root = document.getElementById("dashboard-model-carousel-dots");
+      root.scrollLeft = 0;
+      scrollCarouselTabsIntoView(dashboardCarouselIndex);
     }
 
     function updateCarouselControls(index, total) {
@@ -2486,6 +2519,8 @@ _INDEX_HTML = """
       tab.onclick = () => goToCarouselPage(Number(tab.dataset.carouselIndex));
     }
     updateCarouselState();
+    resetCarouselTabsScroll();
+    requestAnimationFrame(resetCarouselTabsScroll);
     document.getElementById("dashboard-clear").onclick = () => {
       document.getElementById("dashboard_dataset").value = "J1";
       document.getElementById("dashboard_status").value = "all";
