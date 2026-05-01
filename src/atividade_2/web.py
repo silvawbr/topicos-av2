@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from .config import ConfigurationError
 from .contracts import BatchProgress, EligibilitySummary, EvaluationProgress, PipelineSummary
 from .dashboard import DashboardService, parse_dashboard_filters
-from .database_dump import DatabaseDumpService, resolve_dump_path
+from .database_dump import DatabaseDumpService, DatabaseResetService, resolve_dump_path
 from .judge_clients.remote_http import RemoteJudgeError
 from .parser import JudgeParseError
 from .run_judge_service import RunJudgeRequest, RunJudgeResult, RunJudgeService
@@ -226,6 +226,7 @@ def create_app(
     backup_dir: Path | str = DEFAULT_BACKUP_DIR,
     dashboard_service: DashboardService | None = None,
     dump_service: DatabaseDumpService | None = None,
+    database_reset_service: DatabaseResetService | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Atividade 2 Judge Console")
     app.state.csrf_token = secrets.token_urlsafe(32)
@@ -234,6 +235,7 @@ def create_app(
     app.state.backup_dir = Path(backup_dir)
     app.state.dashboard = dashboard_service or DashboardService()
     app.state.dump_service = dump_service or DatabaseDumpService(output_dir=backup_dir)
+    app.state.database_reset_service = database_reset_service or DatabaseResetService()
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -355,6 +357,32 @@ def create_app(
         except RuntimeError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         return asdict(result)
+
+    @app.post("/api/database-reset", dependencies=[Depends(_require_csrf)])
+    def reset_database(request: Request) -> dict:
+        try:
+            return request.app.state.database_reset_service.reset_to_initial_state()
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @app.post("/api/database-restore", dependencies=[Depends(_require_csrf)])
+    async def restore_database_backup(request: Request) -> dict:
+        filename = request.headers.get("x-backup-filename", "")
+        if not filename.endswith(".sql"):
+            raise HTTPException(status_code=400, detail="Selecione um arquivo .sql.")
+        restore_dir = request.app.state.backup_dir / ".restore_uploads"
+        restore_dir.mkdir(parents=True, exist_ok=True)
+        restore_path = restore_dir / f"{uuid.uuid4()}_{Path(filename).name}"
+        try:
+            body = await request.body()
+            if not body:
+                raise HTTPException(status_code=400, detail="Arquivo de backup vazio.")
+            restore_path.write_bytes(body)
+            return request.app.state.database_reset_service.restore_backup(restore_path)
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        finally:
+            restore_path.unlink(missing_ok=True)
 
     @app.get("/api/database-dumps/{filename}")
     def download_database_dump(filename: str, request: Request) -> FileResponse:
@@ -675,8 +703,16 @@ _INDEX_HTML = """
     .dashboard-layout { width:min(100%, 1440px); margin:0 auto; padding:20px; display:grid; grid-template-columns:minmax(280px,340px) minmax(0,1fr); gap:18px; }
     .dashboard-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:14px; }
     .dashboard-head p { margin:4px 0 0; color:var(--muted); font-size:13px; line-height:1.4; }
-    .dashboard-actions { display:flex; flex-direction:column; align-items:flex-end; gap:6px; min-width:190px; }
-    .dashboard-actions button { width:100%; }
+    .dashboard-actions { position:relative; display:flex; flex-direction:column; align-items:flex-end; gap:6px; min-width:230px; }
+    .database-actions-toggle { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-width:174px; min-height:38px; padding:0 12px; border-color:var(--accent); background:var(--accent); color:#fff; font-size:13px; font-weight:750; box-shadow:0 6px 14px rgba(23,105,170,.22); }
+    .database-actions-toggle-icon { font-size:17px; line-height:1; }
+    .database-actions-toggle-caret { font-size:11px; line-height:1; opacity:.9; }
+    .database-actions-menu { position:absolute; top:42px; right:0; z-index:20; display:grid; gap:4px; width:240px; padding:6px; border:1px solid var(--line); border-radius:8px; background:#fff; box-shadow:0 12px 28px rgba(16,24,40,.14); }
+    .database-actions-menu[hidden] { display:none; }
+    .database-actions-menu button { width:100%; min-height:34px; border-color:transparent; background:#fff; color:var(--ink); text-align:left; font-size:13px; }
+    .database-actions-menu button:hover { background:#f2f8fd; color:var(--accent); }
+    .database-actions-menu button.danger { color:var(--bad); }
+    .database-actions-menu button.danger:hover { background:#fff5f5; }
     .dashboard-filters select[multiple] { min-height:92px; }
     .dashboard-filter-actions { display:flex; gap:8px; margin-top:12px; }
     .dashboard-filter-actions button { flex:1; }
@@ -720,6 +756,13 @@ _INDEX_HTML = """
     .dialog-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 14px; border-bottom:1px solid var(--line); }
     .dialog-body { padding:14px; }
     .dialog-body h3 { margin:12px 0 6px; font-size:13px; }
+    .confirm-dialog { width:min(520px, calc(100vw - 28px)); }
+    .confirm-dialog .dialog-body { display:grid; gap:10px; }
+    .confirm-dialog p { margin:0; color:var(--muted); font-size:13px; line-height:1.45; }
+    .confirm-actions { display:flex; justify-content:flex-end; align-items:center; gap:8px; padding:12px 14px; border-top:1px solid var(--line); }
+    .confirm-actions button { min-width:96px; white-space:nowrap; }
+    .confirm-actions .backup-clean-button { min-width:206px; }
+    .danger-button { border-color:var(--bad); background:var(--bad); color:#fff; }
     .ok { color:var(--ok); }
     .bad { color:var(--bad); }
     .muted { color:var(--muted); }
@@ -767,8 +810,18 @@ _INDEX_HTML = """
           <p>Visao consolidada das avaliacoes LLM-as-a-Judge, correlacao, distribuicao de notas e analise de erros.</p>
         </div>
         <div class="dashboard-actions">
-          <button id="database-dump" type="button">Exportar dump do banco</button>
-          <span id="database-dump-status" class="status">Dump completo em outputs/backup.</span>
+          <button id="database-actions-toggle" class="database-actions-toggle" type="button" aria-haspopup="menu" aria-expanded="false" title="Acoes do banco">
+            <span class="database-actions-toggle-icon" aria-hidden="true">&#9881;</span>
+            <span>Acoes do Banco</span>
+            <span class="database-actions-toggle-caret" aria-hidden="true">▼</span>
+          </button>
+          <div id="database-actions-menu" class="database-actions-menu" role="menu" hidden>
+            <button id="database-clean" class="danger" type="button" role="menuitem">Clean DB (Initial State)</button>
+            <button id="database-restore" type="button" role="menuitem">Restaurar Backup</button>
+            <button id="database-dump" type="button" role="menuitem">Exportar Dump do Banco</button>
+          </div>
+          <input id="database-restore-file" type="file" accept=".sql,application/sql,text/plain" hidden>
+          <span id="database-dump-status" class="status"></span>
         </div>
       </div>
       <div id="dashboard-cards" class="metric-grid"></div>
@@ -1070,6 +1123,36 @@ _INDEX_HTML = """
       <pre id="audit-log-content" class="audit-log-content">Audit log nao selecionado.</pre>
     </div>
   </dialog>
+  <dialog id="database-clean-dialog" class="confirm-dialog">
+    <div class="dialog-head">
+      <strong>Clean DB (Initial State)</strong>
+    </div>
+    <div class="dialog-body">
+      <p>Resetar o banco para o estado inicial?</p>
+      <p>Isso limpa o schema public, restaura backup_atividade_2.sql e valida o restore.</p>
+    </div>
+    <div class="confirm-actions">
+      <button id="database-clean-cancel" class="secondary" type="button">Cancelar</button>
+      <button id="database-clean-backup-confirm" class="secondary backup-clean-button" type="button">Fazer backup e limpar</button>
+      <button id="database-clean-confirm" class="danger-button" type="button">Limpar</button>
+    </div>
+  </dialog>
+  <dialog id="database-dump-dialog" class="confirm-dialog">
+    <div class="dialog-head">
+      <strong>Backup salvo</strong>
+      <button id="database-dump-dialog-close" class="secondary" type="button">Fechar</button>
+    </div>
+    <div class="dialog-body">
+      <p>O dump do banco foi criado com sucesso.</p>
+      <table>
+        <tbody>
+          <tr><th>Arquivo</th><td id="database-dump-filename"></td></tr>
+          <tr><th>Caminho</th><td id="database-dump-path"></td></tr>
+          <tr><th>Tamanho</th><td id="database-dump-size"></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </dialog>
   <script>
     let csrfToken = "";
     let pollTimer = null;
@@ -1344,6 +1427,22 @@ _INDEX_HTML = """
       if (response.status === 403 && data.detail === "Invalid CSRF token." && retryOnCsrf) {
         await loadConfig();
         return postJson(url, body, false);
+      }
+      if (!response.ok) throw new Error(data.detail || "Request failed");
+      return data;
+    }
+
+    async function postBackupFile(file, retryOnCsrf = true) {
+      if (!csrfToken) await loadConfig();
+      const response = await fetch("/api/database-restore", {
+        method: "POST",
+        headers: {"content-type": "application/sql", "x-csrf-token": csrfToken, "x-backup-filename": file.name},
+        body: await file.arrayBuffer()
+      });
+      const data = await response.json();
+      if (response.status === 403 && data.detail === "Invalid CSRF token." && retryOnCsrf) {
+        await loadConfig();
+        return postBackupFile(file, false);
       }
       if (!response.ok) throw new Error(data.detail || "Request failed");
       return data;
@@ -1835,6 +1934,42 @@ _INDEX_HTML = """
     }
     document.getElementById("details-close").onclick = () => document.getElementById("details-dialog").close();
     document.getElementById("audit-log-close").onclick = () => document.getElementById("audit-log-dialog").close();
+    document.getElementById("database-dump-dialog-close").onclick = () => document.getElementById("database-dump-dialog").close();
+    function showDatabaseDumpDialog(data) {
+      setText("database-dump-filename", data.filename || "-");
+      setText("database-dump-path", data.path || "-");
+      setText("database-dump-size", `${Math.round((data.size_bytes || 0) / 1024)} KB`);
+      document.getElementById("database-dump-dialog").showModal();
+    }
+    function confirmDatabaseClean() {
+      const dialog = document.getElementById("database-clean-dialog");
+      return new Promise((resolve) => {
+        const cancel = document.getElementById("database-clean-cancel");
+        const confirm = document.getElementById("database-clean-confirm");
+        const backupConfirm = document.getElementById("database-clean-backup-confirm");
+        let settled = false;
+        const cleanup = (action) => {
+          if (settled) return;
+          settled = true;
+          cancel.onclick = null;
+          confirm.onclick = null;
+          backupConfirm.onclick = null;
+          dialog.oncancel = null;
+          dialog.onclose = null;
+          if (dialog.open) dialog.close();
+          resolve(action);
+        };
+        cancel.onclick = () => cleanup("cancel");
+        confirm.onclick = () => cleanup("clean");
+        backupConfirm.onclick = () => cleanup("backup-clean");
+        dialog.oncancel = (event) => {
+          event.preventDefault();
+          cleanup("cancel");
+        };
+        dialog.onclose = () => cleanup("cancel");
+        dialog.showModal();
+      });
+    }
     for (const button of document.querySelectorAll(".tab-button")) {
       button.onclick = () => switchTab(button.dataset.tab);
     }
@@ -1848,19 +1983,78 @@ _INDEX_HTML = """
       }
       loadDashboard();
     };
+
+    const databaseActionsToggle = document.getElementById("database-actions-toggle");
+    const databaseActionsMenu = document.getElementById("database-actions-menu");
+    function setDatabaseActionsMenu(open) {
+      databaseActionsMenu.hidden = !open;
+      databaseActionsToggle.setAttribute("aria-expanded", String(open));
+    }
+    databaseActionsToggle.onclick = (event) => {
+      event.stopPropagation();
+      setDatabaseActionsMenu(databaseActionsMenu.hidden);
+    };
+    databaseActionsMenu.onclick = (event) => event.stopPropagation();
+    document.addEventListener("click", () => setDatabaseActionsMenu(false));
+
+    document.getElementById("database-clean").onclick = async () => {
+      setDatabaseActionsMenu(false);
+      const cleanAction = await confirmDatabaseClean();
+      if (cleanAction === "cancel") return;
+      const button = document.getElementById("database-clean");
+      const status = document.getElementById("database-dump-status");
+      button.disabled = true;
+      try {
+        if (cleanAction === "backup-clean") {
+          status.textContent = "Gerando dump antes de limpar...";
+          const dumpData = await postJson("/api/database-dumps", {});
+          showDatabaseDumpDialog(dumpData);
+        }
+        status.textContent = "Restaurando banco para o estado inicial...";
+        const data = await postJson("/api/database-reset", {});
+        status.textContent = data.message || "Banco restaurado para o estado inicial.";
+        await loadDashboard();
+      } catch (error) {
+        status.textContent = friendlyErrorMessage(error.message);
+      } finally {
+        button.disabled = false;
+      }
+    };
+
+    const restoreFileInput = document.getElementById("database-restore-file");
+    document.getElementById("database-restore").onclick = () => {
+      setDatabaseActionsMenu(false);
+      restoreFileInput.value = "";
+      restoreFileInput.click();
+    };
+    restoreFileInput.onchange = async () => {
+      const file = restoreFileInput.files?.[0];
+      if (!file) return;
+      const button = document.getElementById("database-restore");
+      const status = document.getElementById("database-dump-status");
+      button.disabled = true;
+      status.textContent = `Restaurando backup ${file.name}...`;
+      try {
+        const data = await postBackupFile(file);
+        status.textContent = data.message || "Backup restaurado.";
+        await loadDashboard();
+      } catch (error) {
+        status.textContent = friendlyErrorMessage(error.message);
+      } finally {
+        button.disabled = false;
+      }
+    };
+
     document.getElementById("database-dump").onclick = async () => {
+      setDatabaseActionsMenu(false);
       const button = document.getElementById("database-dump");
       const status = document.getElementById("database-dump-status");
       button.disabled = true;
       status.textContent = "Gerando dump completo...";
       try {
         const data = await postJson("/api/database-dumps", {});
-        const link = document.createElement("a");
-        link.href = data.download_url;
-        link.download = data.filename;
-        link.textContent = `${data.filename} (${Math.round((data.size_bytes || 0) / 1024)} KB)`;
         status.textContent = "";
-        status.appendChild(link);
+        showDatabaseDumpDialog(data);
       } catch (error) {
         status.textContent = friendlyErrorMessage(error.message);
       } finally {
