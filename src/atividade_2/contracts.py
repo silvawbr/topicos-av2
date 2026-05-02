@@ -38,6 +38,7 @@ class JudgeSettings:
 
     app_env: AppEnvironment
     database_url: str
+    backup_root_file: str
     judge_provider: JudgeProvider
     remote_judge_base_url: str | None
     remote_judge_api_key: str | None

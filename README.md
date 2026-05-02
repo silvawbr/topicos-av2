@@ -224,6 +224,7 @@ O modo `single` usa `REMOTE_JUDGE_MODEL`, o mesmo modelo do juiz 1. Se só a URL
 | Variável | Padrão recomendado | Quando mudar |
 |---|---|---|
 | `APP_ENV` | `dev` | Use `prod` para publicar a última versão do backup em `backup_atividade_2.sql`; `dev` e `test` salvam apenas em `outputs/backup/`. |
+| `BACKUP_ROOT_FILE` | `backup_atividade_2.sql` | Caminho do arquivo único de última versão. No container Web, é sobrescrito para `/workspace/backup_atividade_2.sql` para escrever na raiz do repositório host. |
 | `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/app_dev` | Se seu banco usa outra porta, usuário ou database. |
 | `JUDGE_PROVIDER` | `remote_http` | Não mude por enquanto. |
 | `JUDGE_PANEL_MODE` | `2plus1` | Use `single` para smoke test barato. |

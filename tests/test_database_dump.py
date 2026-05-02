@@ -52,10 +52,10 @@ def test_create_dump_updates_root_backup_in_prod(monkeypatch, tmp_path) -> None:
 
     service = DatabaseDumpService(
         output_dir=output_dir,
-        root_backup_file=root_backup,
         settings_loader=lambda: SimpleNamespace(
             app_env="prod",
             database_url="postgresql://postgres:postgres@localhost:5432/app_dev",
+            backup_root_file=str(root_backup),
         ),
         now=lambda: database_dump.datetime(2026, 5, 2, 9, 30, 0),
     )

@@ -22,6 +22,7 @@ def test_settings_load_default_models_from_env() -> None:
     settings = load_settings(dotenv_path=None, env=BASE_ENV)
 
     assert settings.app_env == "dev"
+    assert settings.backup_root_file == "backup_atividade_2.sql"
     assert settings.remote_judge_base_url == "https://example.invalid/v1"
     assert settings.remote_judge_api_key == "test-key"
     assert settings.remote_judge_endpoints == {}
@@ -45,6 +46,15 @@ def test_app_env_can_be_loaded_from_env() -> None:
     settings = load_settings(dotenv_path=None, env=env)
 
     assert settings.app_env == "prod"
+
+
+def test_backup_root_file_can_be_loaded_from_env() -> None:
+    env = dict(BASE_ENV)
+    env["BACKUP_ROOT_FILE"] = "/workspace/backup_atividade_2.sql"
+
+    settings = load_settings(dotenv_path=None, env=env)
+
+    assert settings.backup_root_file == "/workspace/backup_atividade_2.sql"
 
 
 def test_invalid_app_env_fails() -> None:

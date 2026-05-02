@@ -66,7 +66,8 @@ class DatabaseDumpService:
             detail = _redact(completed.stderr or completed.stdout or "pg_dump falhou.", settings.database_url)
             raise RuntimeError(f"Falha ao gerar dump do banco: {detail}") from None
 
-        root_backup_path = self.root_backup_file.resolve()
+        configured_root_backup_file = Path(getattr(settings, "backup_root_file", self.root_backup_file))
+        root_backup_path = configured_root_backup_file.resolve()
         if settings.app_env == "prod" and output_path != root_backup_path:
             shutil.copy2(output_path, root_backup_path)
 
