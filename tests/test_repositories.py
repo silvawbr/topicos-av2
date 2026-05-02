@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from atividade_2.contracts import ModelSpec
-from atividade_2.repositories import JudgeRepository
+from atividade_2.repositories import JudgeRepository, _default_prompt_config
 
 
 class RecordingCursor:
@@ -52,3 +52,11 @@ def test_pending_answer_selection_takes_a_batch_per_required_judge() -> None:
     assert "required.papel_juiz" in query
     assert "WHERE required_rank <= %s" in query
     assert connection.cursor_instance.params[-1] == 2
+
+
+def test_default_j1_prompt_matches_professor_style_persona_and_rubric() -> None:
+    defaults = _default_prompt_config("OAB_Bench")
+    assert "Desembargador" in defaults["persona"]
+    assert "densidade de informacao correta" in defaults["persona"]
+    assert "Rubrica de avaliacao (1 a 5)" in defaults["rubric"]
+    assert "Ignore o tamanho do texto" in defaults["rubric"]
