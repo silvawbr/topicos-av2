@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_judge.add_argument(
         "--judge-execution-strategy",
-        choices=["sequential", "parallel"],
+        choices=["sequential", "parallel", "adaptive"],
         help="Run judge API calls sequentially or in parallel within each answer.",
     )
     run_judge.add_argument(
@@ -58,6 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Resolve configuration and print the execution summary without DB or HTTP calls.",
+    )
+    run_judge.add_argument(
+        "--preflight-report",
+        action="store_true",
+        help="Print the adaptive concurrency plan without DB selection or judge evaluation.",
     )
     run_judge.add_argument(
         "--audit-log",
@@ -93,11 +98,12 @@ def run_judge_command(args: argparse.Namespace) -> int:
         judge_model=args.judge_model,
         secondary_judge_model=args.secondary_judge_model,
         arbiter_judge_model=args.arbiter_judge_model,
-        always_run_arbiter=args.always_run_arbiter,
+        always_run_arbiter=True if args.always_run_arbiter else None,
         judge_execution_strategy=args.judge_execution_strategy,
         dataset=args.dataset,
         batch_size=args.batch_size,
         dry_run=args.dry_run,
+        preflight_report=args.preflight_report,
         audit_log=args.audit_log,
         no_audit_animation=args.no_audit_animation,
     )

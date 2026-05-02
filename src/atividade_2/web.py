@@ -39,7 +39,7 @@ class RunPayload(BaseModel):
     panel_mode: Literal["single", "primary_only", "2plus1"] | None = None
     dataset: Literal["J1", "J2", "OAB_Bench", "OAB_Exames"] = "J2"
     batch_size: int | None = Field(default=None, ge=1)
-    judge_execution_strategy: Literal["sequential", "parallel"] | None = None
+    judge_execution_strategy: Literal["sequential", "parallel", "adaptive"] | None = None
     judge_model: str | None = None
     secondary_judge_model: str | None = None
     arbiter_judge_model: str | None = None
@@ -50,6 +50,9 @@ class RunPayload(BaseModel):
     remote_secondary_judge_api_key: str | None = None
     remote_arbiter_judge_base_url: str | None = None
     remote_arbiter_judge_api_key: str | None = None
+    endpoint_source_judge: Literal["env", "custom"] | None = None
+    endpoint_source_secondary: Literal["env", "judge", "custom"] | None = None
+    endpoint_source_arbiter: Literal["env", "judge", "secondary", "custom"] | None = None
     judge_arbitration_min_delta: int | None = Field(default=None, ge=0)
     remote_judge_timeout_seconds: int | None = Field(default=None, ge=1)
     remote_judge_temperature: float | None = Field(default=None, ge=0)
@@ -74,6 +77,9 @@ class RunPayload(BaseModel):
             remote_secondary_judge_api_key=self.remote_secondary_judge_api_key or None,
             remote_arbiter_judge_base_url=self.remote_arbiter_judge_base_url or None,
             remote_arbiter_judge_api_key=self.remote_arbiter_judge_api_key or None,
+            endpoint_source_judge=self.endpoint_source_judge,
+            endpoint_source_secondary=self.endpoint_source_secondary,
+            endpoint_source_arbiter=self.endpoint_source_arbiter,
             judge_arbitration_min_delta=self.judge_arbitration_min_delta,
             remote_judge_timeout_seconds=self.remote_judge_timeout_seconds,
             remote_judge_temperature=self.remote_judge_temperature,
@@ -187,6 +193,8 @@ class JobRegistry:
                 self._jobs[run_id].eligibility = eligibility
 
         def update_evaluation(evaluation: EvaluationProgress) -> None:
+            if evaluation.status == "skipped":
+                return
             with self._lock:
                 _upsert_evaluation_event(self._jobs[run_id].evaluation_events, evaluation)
 
@@ -238,8 +246,8 @@ def create_app(
     app.state.database_reset_service = database_reset_service or DatabaseResetService()
 
     @app.get("/", response_class=HTMLResponse)
-    def index() -> str:
-        return _INDEX_HTML
+    def index() -> HTMLResponse:
+        return HTMLResponse(_INDEX_HTML, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/config")
     def get_config(request: Request) -> dict:
@@ -415,6 +423,9 @@ def _require_csrf(request: Request) -> None:
 
 
 def _serialize_job(job: JobState) -> dict:
+    eligibility = job.eligibility
+    if eligibility is None and job.result is not None:
+        eligibility = job.result.eligibility
     return {
         "run_id": job.run_id,
         "status": job.status,
@@ -422,15 +433,39 @@ def _serialize_job(job: JobState) -> dict:
         "finished_at": job.finished_at.isoformat() if job.finished_at is not None else None,
         "duration_seconds": _duration_seconds(job.started_at, job.finished_at, 0),
         "duration": _format_duration(_duration_seconds(job.started_at, job.finished_at, 0)),
-        "progress": asdict(job.progress),
+        "progress": asdict(_effective_progress(job, eligibility)),
         "audit_log": job.audit_log,
         "audit_log_url": f"/api/runs/{job.run_id}/audit-log" if job.audit_log else None,
         "command_preview": job.command_preview,
-        "eligibility": asdict(job.eligibility) if job.eligibility is not None else None,
+        "eligibility": asdict(eligibility) if eligibility is not None else None,
         "evaluation_events": [asdict(event) for event in job.evaluation_events],
         "error": job.error,
         "result": _serialize_result(job.result) if job.result is not None else None,
     }
+
+
+def _effective_progress(job: JobState, eligibility: EligibilitySummary | None) -> BatchProgress:
+    if job.result is not None and job.result.summary is not None:
+        summary = job.result.summary
+        total = summary.selected_answers
+        return BatchProgress(
+            current=total,
+            total=total,
+            percent=100,
+            executed_evaluations=summary.executed_evaluations,
+            skipped_evaluations=summary.skipped_evaluations,
+            arbiter_evaluations=summary.arbiter_evaluations,
+        )
+    if eligibility is not None and job.progress.total == 0:
+        return BatchProgress(
+            current=0,
+            total=eligibility.will_process,
+            percent=0,
+            executed_evaluations=job.progress.executed_evaluations,
+            skipped_evaluations=job.progress.skipped_evaluations,
+            arbiter_evaluations=job.progress.arbiter_evaluations,
+        )
+    return job.progress
 
 
 def _serialize_result(result: RunJudgeResult) -> dict:
@@ -1013,9 +1048,9 @@ _INDEX_HTML = """
         </label>
       </div>
       <label>Estrategia
-        <select id="judge_execution_strategy"><option>sequential</option><option>parallel</option></select>
+        <select id="judge_execution_strategy"><option>sequential</option><option>parallel</option><option>adaptive</option></select>
       </label>
-      <div class="hint">Sequential e melhor para endpoint local ou fragil. Parallel e indicado para endpoint remoto que aceita concorrencia.</div>
+      <div class="hint">Sequential e melhor para endpoint local ou fragil. Parallel usa concorrencia fixa por resposta. Adaptive ajusta concorrencia por endpoint/modelo.</div>
       <div id="judge_block" class="judge-block" data-judge-block="judge">
       <label>Juiz 1 - modelo
         <select id="judge_model"></select>
@@ -1073,10 +1108,10 @@ _INDEX_HTML = """
       </label>
       </div>
       </div>
-      <label class="inline"><input id="judge_save_raw_response" type="checkbox"> Salvar resposta bruta do juiz</label>
+      <label class="inline"><input id="always_run_arbiter" type="checkbox"> Rodar arbitro sempre <span class="warn">aumenta custo e chamadas remotas</span></label>
       <details>
         <summary>Campos avancados</summary>
-        <label class="inline"><input id="always_run_arbiter" type="checkbox"> Rodar arbitro sempre <span class="warn">aumenta custo e chamadas remotas</span></label>
+        <label class="inline"><input id="judge_save_raw_response" type="checkbox"> Salvar resposta bruta do juiz</label>
         <div class="row">
           <label>Timeout (s)
             <input id="remote_judge_timeout_seconds" type="number" min="1">
@@ -1297,9 +1332,11 @@ _INDEX_HTML = """
         ["REMOTE_JUDGE_BASE_URL is required", "Configure a URL do endpoint do juiz"],
         ["REMOTE_JUDGE_API_KEY is required", "Configure a key local; não commitar"],
         ["invalid JSON", "O modelo não respeitou o contrato de saída"],
+        ["gated model", "Modelo sem acesso neste provedor"],
+        ["don't have access", "Modelo sem acesso neste provedor"],
         ["model does not exist", "Modelo inválido ou sem acesso nesse provedor"],
         ["HTTP 401", "key inválida ou sem permissão"],
-        ["HTTP 403", "key inválida ou sem permissão"],
+        ["HTTP 403", "acesso negado pelo provedor"],
         ["HTTP 404", "base URL/modelo incorreto"]
       ];
       for (const [needle, friendly] of mappings) {
@@ -1976,7 +2013,9 @@ _INDEX_HTML = """
     }
 
     function payload() {
-      applyEndpointSources();
+      const judgeEndpointSource = value("endpoint_source_judge");
+      const secondaryEndpointSource = value("endpoint_source_secondary");
+      const arbiterEndpointSource = value("endpoint_source_arbiter");
       return {
         panel_mode: value("panel_mode"),
         dataset: value("dataset"),
@@ -1986,12 +2025,15 @@ _INDEX_HTML = """
         secondary_judge_model: value("secondary_judge_model"),
         arbiter_judge_model: value("arbiter_judge_model"),
         always_run_arbiter: document.getElementById("always_run_arbiter").checked,
-        remote_judge_base_url: value("remote_judge_base_url"),
-        remote_judge_api_key: value("remote_judge_api_key"),
-        remote_secondary_judge_base_url: value("remote_secondary_judge_base_url"),
-        remote_secondary_judge_api_key: value("remote_secondary_judge_api_key"),
-        remote_arbiter_judge_base_url: value("remote_arbiter_judge_base_url"),
-        remote_arbiter_judge_api_key: value("remote_arbiter_judge_api_key"),
+        remote_judge_base_url: judgeEndpointSource === "custom" ? value("remote_judge_base_url") : "",
+        remote_judge_api_key: judgeEndpointSource === "custom" ? value("remote_judge_api_key") : "",
+        remote_secondary_judge_base_url: secondaryEndpointSource === "custom" ? value("remote_secondary_judge_base_url") : "",
+        remote_secondary_judge_api_key: secondaryEndpointSource === "custom" ? value("remote_secondary_judge_api_key") : "",
+        remote_arbiter_judge_base_url: arbiterEndpointSource === "custom" ? value("remote_arbiter_judge_base_url") : "",
+        remote_arbiter_judge_api_key: arbiterEndpointSource === "custom" ? value("remote_arbiter_judge_api_key") : "",
+        endpoint_source_judge: judgeEndpointSource,
+        endpoint_source_secondary: secondaryEndpointSource,
+        endpoint_source_arbiter: arbiterEndpointSource,
         judge_arbitration_min_delta: optionalNumber("judge_arbitration_min_delta"),
         remote_judge_timeout_seconds: optionalNumber("remote_judge_timeout_seconds"),
         remote_judge_temperature: optionalNumber("remote_judge_temperature"),
@@ -2059,7 +2101,7 @@ _INDEX_HTML = """
       setText("eligible-successful", eligibility?.successful);
       setText("eligible-will-process", eligibility?.will_process);
       const summary = data.result?.summary;
-      setText("selected", summary?.selected_answers);
+      setText("selected", summary?.selected_answers ?? eligibility?.will_process ?? data.progress?.total);
       setText("executed", summary?.executed_evaluations ?? data.progress?.executed_evaluations);
       setText("skipped", summary?.skipped_evaluations ?? data.progress?.skipped_evaluations);
       setText("arbiters", summary?.arbiter_evaluations ?? data.progress?.arbiter_evaluations);
@@ -2263,7 +2305,7 @@ _INDEX_HTML = """
           formatBoolean(event.arbiter_triggered),
           event.trigger_reason,
           formatLatency(event.latency_ms),
-          friendlyErrorMessage(event.error)
+          event.error ? friendlyErrorMessage(event.error) : null
         ]) appendCell(row, display(value));
         const detailsCell = document.createElement("td");
         const button = document.createElement("button");
@@ -2343,7 +2385,24 @@ _INDEX_HTML = """
     }
 
     async function poll(runId) {
-      const data = await (await fetch(`/api/runs/${runId}`)).json();
+      let response;
+      try {
+        response = await fetch(`/api/runs/${runId}`, {cache: "no-store"});
+      } catch (error) {
+        setText("output", `Falha ao atualizar execucao: ${friendlyErrorMessage(error.message)}`);
+        return;
+      }
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setText("output", data.detail || "Falha ao atualizar execucao.");
+        if (response.status === 404 && pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+          activeRunId = null;
+          updateStopButton(null, "idle");
+        }
+        return;
+      }
       renderRun(data);
       if (["completed", "failed", "cancelled"].includes(data.status) && pollTimer) {
         clearInterval(pollTimer);
@@ -2441,7 +2500,7 @@ _INDEX_HTML = """
       for (const panel of document.querySelectorAll(".tab-panel")) {
         panel.hidden = panel.id !== targetId;
       }
-      if (targetId === "dashboard-panel" && !dashboardLoaded) loadDashboard();
+      if (targetId === "dashboard-panel") loadDashboard();
       if (targetId === "history-panel" && !historyLoaded) loadHistory();
     }
 
@@ -2464,7 +2523,7 @@ _INDEX_HTML = """
         if (model) document.getElementById(key).value = model;
       }
       renderJudgeModelSelects();
-      document.getElementById("always_run_arbiter").checked = Boolean(defaults.always_run_arbiter);
+      document.getElementById("always_run_arbiter").checked = false;
       document.getElementById("judge_save_raw_response").checked = Boolean(defaults.judge_save_raw_response);
       document.getElementById("remote_judge_openai_compatible").value = String(Boolean(defaults.remote_judge_openai_compatible));
       setText("config-status", config.configuration_error || `Endpoints: juiz 1 ${config.endpoints?.JUDGE?.host || "-"} / juiz 2 ${config.endpoints?.SECONDARY_JUDGE?.host || "-"}`);
@@ -2491,39 +2550,14 @@ _INDEX_HTML = """
       await loadDashboard();
     }
 
-    function copyEndpointValues(source, target) {
-      const sourcePrefix = source === "secondary" ? "remote_secondary_judge" : "remote_judge";
-      const targetPrefix = target === "arbiter" ? "remote_arbiter_judge" : "remote_secondary_judge";
-      document.getElementById(`${targetPrefix}_base_url`).value = document.getElementById(`${sourcePrefix}_base_url`).value;
-      document.getElementById(`${targetPrefix}_api_key`).value = document.getElementById(`${sourcePrefix}_api_key`).value;
-    }
-
-    function clearEndpoint(target) {
-      const prefix = target === "judge" ? "remote_judge" : `remote_${target}_judge`;
-      document.getElementById(`${prefix}_base_url`).value = "";
-      document.getElementById(`${prefix}_api_key`).value = "";
-    }
-
     function renderEndpointFields() {
       for (const name of ["judge", "secondary", "arbiter"]) {
         document.getElementById(`endpoint_fields_${name}`).hidden = value(`endpoint_source_${name}`) !== "custom";
       }
     }
 
-    function applyEndpointSources() {
-      const secondarySource = value("endpoint_source_secondary");
-      const arbiterSource = value("endpoint_source_arbiter");
-      if (value("endpoint_source_judge") === "env") clearEndpoint("judge");
-      if (secondarySource === "env") clearEndpoint("secondary");
-      else if (secondarySource === "judge") copyEndpointValues("judge", "secondary");
-      if (arbiterSource === "env") clearEndpoint("arbiter");
-      else if (arbiterSource === "judge") copyEndpointValues("judge", "arbiter");
-      else if (arbiterSource === "secondary") copyEndpointValues("secondary", "arbiter");
-    }
-
     for (const id of ["endpoint_source_judge", "endpoint_source_secondary", "endpoint_source_arbiter"]) {
       document.getElementById(id).onchange = () => {
-        applyEndpointSources();
         renderEndpointFields();
       };
     }

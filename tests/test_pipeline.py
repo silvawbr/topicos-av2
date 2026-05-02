@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+import threading
+import time
 from contextlib import contextmanager
 
+import pytest
+
 from atividade_2.config import load_settings, resolve_runtime_config
-from atividade_2.contracts import BatchProgress, CandidateAnswerContext, EvaluationProgress, JudgeRawResponse
+from atividade_2.contracts import (
+    BatchProgress,
+    CandidateAnswerContext,
+    EvaluationProgress,
+    EvaluationRecord,
+    JudgeRawResponse,
+    ModelSpec,
+    StoredJudgeRole,
+)
+from atividade_2.judge_clients.remote_http import RemoteJudgeError
 from atividade_2.pipeline import JudgePipeline
 from atividade_2.repositories import InMemoryJudgeRepository
 
@@ -42,6 +55,148 @@ class FakeJudgeClient:
         )
 
 
+class SlowRecordingJudgeClient(FakeJudgeClient):
+    def __init__(self, scores: dict[str, int], *, delay_seconds: float) -> None:
+        super().__init__(scores)
+        self.delay_seconds = delay_seconds
+        self.current_calls = 0
+        self.max_seen = 0
+        self._lock = threading.Lock()
+
+    def judge(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        requested_model: str | None = None,
+        endpoint_key: str | None = None,
+    ) -> JudgeRawResponse:
+        with self._lock:
+            self.current_calls += 1
+            self.max_seen = max(self.max_seen, self.current_calls)
+        try:
+            time.sleep(self.delay_seconds)
+            return super().judge(prompt, model, requested_model=requested_model, endpoint_key=endpoint_key)
+        finally:
+            with self._lock:
+                self.current_calls -= 1
+
+
+class FlakyRateLimitJudgeClient(FakeJudgeClient):
+    def __init__(self, scores: dict[str, int]) -> None:
+        super().__init__(scores)
+        self.fail_once = True
+
+    def judge(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        requested_model: str | None = None,
+        endpoint_key: str | None = None,
+    ) -> JudgeRawResponse:
+        self.calls.append(model)
+        self.endpoint_keys.append(endpoint_key)
+        if self.fail_once:
+            self.fail_once = False
+            raise RemoteJudgeError(
+                "Remote judge returned HTTP 429: rate limited",
+                status_code=429,
+                retry_after_seconds=0,
+                retryable=True,
+            )
+        score = self.scores[model]
+        return JudgeRawResponse(
+            text=f'{{"score": {score}, "rationale": "nota {score}"}}',
+            provider="fake",
+            model=model,
+            latency_ms=1,
+        )
+
+
+class DailyTokenQuotaJudgeClient(FakeJudgeClient):
+    def judge(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        requested_model: str | None = None,
+        endpoint_key: str | None = None,
+    ) -> JudgeRawResponse:
+        self.calls.append(model)
+        self.endpoint_keys.append(endpoint_key)
+        raise RemoteJudgeError(
+            (
+                "Remote judge returned HTTP 429: Rate limit reached for model "
+                "`llama-3.3-70b-versatile` on tokens per day (TPD): Limit 100000, "
+                "Used 99787, Requested 1094. Please try again in 12m41.184s."
+            ),
+            status_code=429,
+            retry_after_seconds=761,
+            retryable=False,
+        )
+
+
+class ModelSpecificDailyTokenQuotaJudgeClient(FakeJudgeClient):
+    def __init__(self, scores: dict[str, int], failing_model: str) -> None:
+        super().__init__(scores)
+        self.failing_model = failing_model
+
+    def judge(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        requested_model: str | None = None,
+        endpoint_key: str | None = None,
+    ) -> JudgeRawResponse:
+        self.calls.append(model)
+        self.endpoint_keys.append(endpoint_key)
+        if model == self.failing_model:
+            raise RemoteJudgeError(
+                (
+                    "Remote judge returned HTTP 429: Rate limit reached for model "
+                    f"`{model}` on tokens per day (TPD): Limit 100000, Used 99787, "
+                    "Requested 1094. Please try again in 12m41.184s."
+                ),
+                status_code=429,
+                retry_after_seconds=761,
+                retryable=False,
+            )
+        score = self.scores[model]
+        return JudgeRawResponse(
+            text=f'{{"score": {score}, "rationale": "nota {score}"}}',
+            provider="fake",
+            model=model,
+            latency_ms=1,
+        )
+
+
+class EventRecordingJudgeClient(FakeJudgeClient):
+    def __init__(self, scores: dict[str, int], slow_model: str) -> None:
+        super().__init__(scores)
+        self.slow_model = slow_model
+        self.events: list[tuple[str, str]] = []
+        self._lock = threading.Lock()
+
+    def judge(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        requested_model: str | None = None,
+        endpoint_key: str | None = None,
+    ) -> JudgeRawResponse:
+        with self._lock:
+            self.events.append(("start", model))
+        if model == self.slow_model:
+            time.sleep(0.03)
+        response = super().judge(prompt, model, requested_model=requested_model, endpoint_key=endpoint_key)
+        with self._lock:
+            self.events.append(("end", model))
+        return response
+
+
 class RecordingAudit:
     def __init__(self) -> None:
         self.terminal_messages: list[str] = []
@@ -66,10 +221,22 @@ def answer() -> CandidateAnswerContext:
     return CandidateAnswerContext(
         answer_id=1,
         question_id=1,
-        dataset_name="OAB_Exames",
+        dataset_name="OAB_Bench",
         question_text="Enunciado",
+        reference_answer="Rubrica",
+        candidate_answer="Resposta candidata",
+        candidate_model="candidate",
+    )
+
+
+def j2_answer() -> CandidateAnswerContext:
+    return CandidateAnswerContext(
+        answer_id=1,
+        question_id=101,
+        dataset_name="OAB_Exames",
+        question_text="Qual alternativa correta?",
         reference_answer="A",
-        candidate_answer="A",
+        candidate_answer="Portanto, a opção correta é A.",
         candidate_model="candidate",
     )
 
@@ -87,6 +254,27 @@ def answer_with_id(answer_id: int) -> CandidateAnswerContext:
     )
 
 
+def _record_for_existing_score(
+    *,
+    answer_id: int,
+    judge_model: ModelSpec,
+    stored_role: StoredJudgeRole,
+    score: int = 5,
+) -> EvaluationRecord:
+    return EvaluationRecord(
+        answer_id=answer_id,
+        judge_model=judge_model,
+        stored_role=stored_role,
+        panel_mode="2plus1",
+        trigger_reason="primary_panel",
+        score=score,
+        rationale="existing",
+        prompt="prompt",
+        rubric="rubric",
+        latency_ms=1,
+    )
+
+
 def test_single_mode_runs_one_judge() -> None:
     settings = load_settings(dotenv_path=None, env=BASE_ENV)
     config = resolve_runtime_config(settings, panel_mode="single")
@@ -99,6 +287,18 @@ def test_single_mode_runs_one_judge() -> None:
     assert len(repo.records) == 1
     assert repo.records[0].stored_role == "principal"
     assert client.endpoint_keys == ["JUDGE"]
+
+
+def test_j2_rejects_non_binary_judge_score() -> None:
+    settings = load_settings(dotenv_path=None, env=BASE_ENV)
+    config = resolve_runtime_config(settings, panel_mode="single")
+    repo = InMemoryJudgeRepository()
+    client = FakeJudgeClient({"openai/gpt-oss-120b": 3})
+
+    with pytest.raises(Exception, match="one of: 1, 5"):
+        JudgePipeline(repo, client).run([j2_answer()], config)
+
+    assert repo.records == []
 
 
 def test_pipeline_reports_batch_progress_after_each_answer() -> None:
@@ -192,7 +392,7 @@ def test_pipeline_reports_evaluation_rows_for_web_table() -> None:
 
     assert [event.status for event in evaluation_events] == ["running", "success"]
     success = evaluation_events[-1]
-    assert success.dataset == "OAB_Exames"
+    assert success.dataset == "OAB_Bench"
     assert success.question_id == 1
     assert success.candidate_model == "candidate"
     assert success.judge_model == "openai/gpt-oss-120b"
@@ -290,6 +490,32 @@ def test_2plus1_skips_arbiter_below_threshold() -> None:
     assert summary.arbiter_evaluations == 0
 
 
+def test_2plus1_does_not_report_skipped_arbiter_as_table_row() -> None:
+    settings = load_settings(dotenv_path=None, env=BASE_ENV)
+    config = resolve_runtime_config(settings, panel_mode="2plus1")
+    repo = InMemoryJudgeRepository()
+    client = FakeJudgeClient(
+        {
+            "openai/gpt-oss-120b": 4,
+            "meta-llama/Llama-3.3-70B-Instruct": 3,
+            "Unbabel/M-Prometheus-14B": 1,
+        }
+    )
+    evaluation_events: list[EvaluationProgress] = []
+
+    summary = JudgePipeline(repo, client, evaluation_callback=evaluation_events.append).run([answer()], config)
+
+    assert summary.executed_evaluations == 2
+    assert summary.skipped_evaluations == 0
+    assert summary.arbiter_evaluations == 0
+    assert [(event.role, event.status) for event in evaluation_events] == [
+        ("principal", "running"),
+        ("principal", "success"),
+        ("controle", "running"),
+        ("controle", "success"),
+    ]
+
+
 def test_2plus1_runs_arbiter_at_threshold() -> None:
     settings = load_settings(dotenv_path=None, env=BASE_ENV)
     config = resolve_runtime_config(settings, panel_mode="2plus1")
@@ -364,3 +590,213 @@ def test_primary_only_supports_parallel_strategy() -> None:
         "meta-llama/Llama-3.3-70B-Instruct",
         "openai/gpt-oss-120b",
     ]
+
+
+def test_adaptive_single_runs_multiple_answers_with_initial_concurrency_limit() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_EXECUTION_STRATEGY"] = "adaptive"
+    env["JUDGE_ADAPTIVE_INITIAL_CONCURRENCY"] = "2"
+    env["JUDGE_ADAPTIVE_MAX_CONCURRENCY"] = "2"
+    settings = load_settings(dotenv_path=None, env=env)
+    config = resolve_runtime_config(settings, panel_mode="single")
+    repo = InMemoryJudgeRepository()
+    client = SlowRecordingJudgeClient({"openai/gpt-oss-120b": 5}, delay_seconds=0.02)
+
+    summary = JudgePipeline(repo, client).run(
+        [answer_with_id(1), answer_with_id(2), answer_with_id(3), answer_with_id(4)],
+        config,
+    )
+
+    assert summary.executed_evaluations == 4
+    assert len(repo.records) == 4
+    assert client.max_seen == 2
+
+
+def test_adaptive_scheduler_increases_concurrency_after_success_threshold() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_EXECUTION_STRATEGY"] = "adaptive"
+    env["JUDGE_ADAPTIVE_INITIAL_CONCURRENCY"] = "1"
+    env["JUDGE_ADAPTIVE_MAX_CONCURRENCY"] = "2"
+    env["JUDGE_ADAPTIVE_SUCCESS_THRESHOLD"] = "1"
+    settings = load_settings(dotenv_path=None, env=env)
+    config = resolve_runtime_config(settings, panel_mode="single")
+    repo = InMemoryJudgeRepository()
+    audit = RecordingAudit()
+    client = SlowRecordingJudgeClient({"openai/gpt-oss-120b": 5}, delay_seconds=0.02)
+
+    JudgePipeline(repo, client, audit=audit).run(
+        [answer_with_id(1), answer_with_id(2), answer_with_id(3)],
+        config,
+    )
+
+    assert any(message == "adaptive_concurrency_increased" for message, _ in audit.events)
+    assert client.max_seen == 2
+
+
+def test_adaptive_scheduler_requeues_429_with_backoff_and_reduces_concurrency() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_EXECUTION_STRATEGY"] = "adaptive"
+    env["JUDGE_ADAPTIVE_INITIAL_CONCURRENCY"] = "2"
+    env["JUDGE_ADAPTIVE_MAX_CONCURRENCY"] = "2"
+    settings = load_settings(dotenv_path=None, env=env)
+    config = resolve_runtime_config(settings, panel_mode="single")
+    repo = InMemoryJudgeRepository()
+    audit = RecordingAudit()
+    client = FlakyRateLimitJudgeClient({"openai/gpt-oss-120b": 5})
+
+    summary = JudgePipeline(repo, client, audit=audit, jitter_func=lambda: 0).run([answer()], config)
+
+    assert summary.executed_evaluations == 1
+    assert client.calls == ["openai/gpt-oss-120b", "openai/gpt-oss-120b"]
+    assert any(message == "adaptive_concurrency_reduced" for message, _ in audit.events)
+    assert any(message == "adaptive_task_requeued" for message, _ in audit.events)
+
+
+def test_adaptive_scheduler_stops_on_daily_token_quota_429_without_retry() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_EXECUTION_STRATEGY"] = "adaptive"
+    env["JUDGE_ADAPTIVE_INITIAL_CONCURRENCY"] = "1"
+    env["JUDGE_ADAPTIVE_MAX_RETRIES"] = "3"
+    settings = load_settings(dotenv_path=None, env=env)
+    config = resolve_runtime_config(settings, panel_mode="single", judge_model="llama-3.3-70b-versatile")
+    repo = InMemoryJudgeRepository()
+    audit = RecordingAudit()
+    client = DailyTokenQuotaJudgeClient({"llama-3.3-70b-versatile": 5})
+
+    summary = JudgePipeline(repo, client, audit=audit).run([answer_with_id(1), answer_with_id(2)], config)
+
+    assert summary.executed_evaluations == 0
+    assert client.calls == ["llama-3.3-70b-versatile"]
+    assert not repo.records
+    assert any(message == "adaptive_task_failed" for message, _ in audit.events)
+    assert any(message == "adaptive_group_disabled" for message, _ in audit.events)
+    assert not any(message == "adaptive_task_requeued" for message, _ in audit.events)
+
+
+def test_adaptive_scheduler_continues_other_models_after_one_model_quota_failure() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_EXECUTION_STRATEGY"] = "adaptive"
+    env["JUDGE_ADAPTIVE_INITIAL_CONCURRENCY"] = "1"
+    env["JUDGE_ADAPTIVE_MAX_CONCURRENCY"] = "1"
+    settings = load_settings(dotenv_path=None, env=env)
+    config = resolve_runtime_config(settings, panel_mode="primary_only")
+    repo = InMemoryJudgeRepository()
+    audit = RecordingAudit()
+    judge_1 = "openai/gpt-oss-120b"
+    judge_2 = "meta-llama/Llama-3.3-70B-Instruct"
+    client = ModelSpecificDailyTokenQuotaJudgeClient({judge_1: 5, judge_2: 4}, failing_model=judge_2)
+
+    summary = JudgePipeline(repo, client, audit=audit).run(
+        [answer_with_id(1), answer_with_id(2), answer_with_id(3)],
+        config,
+    )
+
+    assert summary.executed_evaluations == 3
+    assert [record.judge_model.provider_model for record in repo.records] == [judge_1, judge_1, judge_1]
+    assert client.calls.count(judge_1) == 3
+    assert client.calls.count(judge_2) == 1
+    assert any(message == "adaptive_group_disabled" for message, _ in audit.events)
+
+
+def test_adaptive_2plus1_starts_each_judge_from_its_own_pending_answers() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_EXECUTION_STRATEGY"] = "adaptive"
+    env["JUDGE_ADAPTIVE_INITIAL_CONCURRENCY"] = "1"
+    env["JUDGE_ADAPTIVE_MAX_CONCURRENCY"] = "1"
+    settings = load_settings(dotenv_path=None, env=env)
+    config = resolve_runtime_config(settings, panel_mode="2plus1")
+    repo = InMemoryJudgeRepository()
+    judge_1 = "openai/gpt-oss-120b"
+    judge_2 = "meta-llama/Llama-3.3-70B-Instruct"
+    client = FakeJudgeClient({judge_1: 5, judge_2: 4})
+
+    repo.persist_evaluation(
+        _record_for_existing_score(answer_id=1, judge_model=config.primary_panel[0], stored_role="principal")
+    )
+    repo.persist_evaluation(
+        _record_for_existing_score(answer_id=2, judge_model=config.primary_panel[1], stored_role="controle")
+    )
+
+    summary = JudgePipeline(repo, client).run([answer_with_id(1), answer_with_id(2)], config)
+
+    assert summary.executed_evaluations == 2
+    assert sorted(client.calls) == sorted([judge_1, judge_2])
+    assert {(record.answer_id, record.stored_role) for record in repo.records} >= {
+        (1, "controle"),
+        (2, "principal"),
+    }
+
+
+def test_adaptive_2plus1_prioritizes_judge_1_then_judge_2_then_arbiter() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_EXECUTION_STRATEGY"] = "adaptive"
+    env["JUDGE_ALWAYS_RUN_ARBITER"] = "true"
+    settings = load_settings(dotenv_path=None, env=env)
+    config = resolve_runtime_config(settings, panel_mode="2plus1", always_run_arbiter=True)
+    repo = InMemoryJudgeRepository()
+    client = FakeJudgeClient(
+        {
+            "openai/gpt-oss-120b": 5,
+            "meta-llama/Llama-3.3-70B-Instruct": 3,
+            "Unbabel/M-Prometheus-14B": 4,
+        }
+    )
+
+    summary = JudgePipeline(repo, client).run([answer_with_id(1), answer_with_id(2)], config)
+
+    assert summary.executed_evaluations == 6
+    assert client.endpoint_keys.count("JUDGE") == 2
+    assert client.endpoint_keys.count("SECONDARY_JUDGE") == 2
+    assert client.endpoint_keys[-2:] == ["ARBITER", "ARBITER"]
+
+
+def test_adaptive_2plus1_reports_batch_progress_after_each_evaluation() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_EXECUTION_STRATEGY"] = "adaptive"
+    env["JUDGE_ALWAYS_RUN_ARBITER"] = "true"
+    settings = load_settings(dotenv_path=None, env=env)
+    config = resolve_runtime_config(settings, panel_mode="2plus1", always_run_arbiter=True)
+    repo = InMemoryJudgeRepository()
+    client = FakeJudgeClient(
+        {
+            "openai/gpt-oss-120b": 5,
+            "meta-llama/Llama-3.3-70B-Instruct": 3,
+            "Unbabel/M-Prometheus-14B": 4,
+        }
+    )
+    progress_events: list[BatchProgress] = []
+
+    JudgePipeline(repo, client, progress_callback=progress_events.append).run(
+        [answer_with_id(1), answer_with_id(2)],
+        config,
+    )
+
+    assert [event.executed_evaluations for event in progress_events] == [1, 2, 3, 4, 5, 6, 6]
+    assert [event.arbiter_evaluations for event in progress_events] == [0, 0, 0, 0, 1, 2, 2]
+    assert progress_events[-1] == BatchProgress(
+        current=2,
+        total=2,
+        percent=100,
+        executed_evaluations=6,
+        skipped_evaluations=0,
+        arbiter_evaluations=2,
+    )
+
+
+def test_adaptive_2plus1_starts_judge_2_before_all_judge_1_finish() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_EXECUTION_STRATEGY"] = "adaptive"
+    env["JUDGE_ADAPTIVE_INITIAL_CONCURRENCY"] = "1"
+    env["JUDGE_ADAPTIVE_MAX_CONCURRENCY"] = "1"
+    settings = load_settings(dotenv_path=None, env=env)
+    config = resolve_runtime_config(settings, panel_mode="primary_only")
+    repo = InMemoryJudgeRepository()
+    judge_1 = "openai/gpt-oss-120b"
+    judge_2 = "meta-llama/Llama-3.3-70B-Instruct"
+    client = EventRecordingJudgeClient({judge_1: 5, judge_2: 4}, slow_model=judge_1)
+
+    JudgePipeline(repo, client).run([answer_with_id(1), answer_with_id(2), answer_with_id(3)], config)
+
+    secondary_start = client.events.index(("start", judge_2))
+    judge_1_final_end = max(index for index, event in enumerate(client.events) if event == ("end", judge_1))
+    assert secondary_start < judge_1_final_end

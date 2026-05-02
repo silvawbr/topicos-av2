@@ -56,6 +56,11 @@ def test_parser_rejects_out_of_range_score() -> None:
         parse_judge_output('{"score": 6, "rationale": "fora da escala"}')
 
 
+def test_parser_rejects_score_outside_allowed_scores() -> None:
+    with pytest.raises(JudgeParseError, match="one of: 1, 5"):
+        parse_judge_output('{"score": 3, "rationale": "parcial"}', allowed_scores={1, 5})
+
+
 def test_parser_rejects_unparseable_response() -> None:
     with pytest.raises(JudgeParseError, match="does not contain a JSON object"):
         parse_judge_output("nota cinco, resposta boa")

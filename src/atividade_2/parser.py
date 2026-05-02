@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Collection
 from typing import Any
 
 from .contracts import ParsedJudgeEvaluation
@@ -14,10 +15,11 @@ class JudgeParseError(ValueError):
     """Raised when a judge response cannot be parsed safely."""
 
 
-def parse_judge_output(text: str) -> ParsedJudgeEvaluation:
+def parse_judge_output(text: str, *, allowed_scores: Collection[int] | None = None) -> ParsedJudgeEvaluation:
     """Parse a JSON judge response and validate score/rationale."""
     payload = _load_json_object(text)
     score = _extract_score(payload)
+    _validate_allowed_score(score, allowed_scores)
     rationale = _extract_rationale(payload)
     evaluation = ParsedJudgeEvaluation(
         score=score,
@@ -47,6 +49,15 @@ def parse_judge_output(text: str) -> ParsedJudgeEvaluation:
         return validate_parsed_evaluation(evaluation)
     except ValidationError as error:
         raise JudgeParseError(str(error)) from error
+
+
+def _validate_allowed_score(score: int, allowed_scores: Collection[int] | None) -> None:
+    if allowed_scores is None:
+        return
+    allowed = sorted(allowed_scores)
+    if score not in allowed_scores:
+        allowed_text = ", ".join(str(value) for value in allowed)
+        raise JudgeParseError(f"Judge score must be one of: {allowed_text}.")
 
 
 def _load_json_object(text: str) -> dict[str, Any]:

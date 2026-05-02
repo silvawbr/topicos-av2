@@ -16,6 +16,21 @@ from atividade_2.contracts import JudgeRawResponse, JudgeSettings
 class RemoteJudgeError(RuntimeError):
     """Raised for remote judge transport or response errors."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        headers: dict[str, str] | None = None,
+        retry_after_seconds: float | None = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.retry_after_seconds = retry_after_seconds
+        self.retryable = retryable
+
 
 class HttpTransport(Protocol):
     """Small transport seam for offline tests."""
@@ -54,11 +69,18 @@ class UrllibHttpTransport:
         except urllib.error.HTTPError as error:
             raw_body = error.read(self.max_response_bytes + 1)
             message = _safe_response_message(raw_body)
-            raise RemoteJudgeError(f"Remote judge returned HTTP {error.code}: {message}") from error
+            headers = dict(error.headers.items()) if error.headers is not None else {}
+            raise RemoteJudgeError(
+                f"Remote judge returned HTTP {error.code}: {message}",
+                status_code=error.code,
+                headers=headers,
+                retry_after_seconds=_parse_retry_after(headers.get("Retry-After")),
+                retryable=_is_retryable_http_error(error.code, message),
+            ) from error
         except urllib.error.URLError as error:
-            raise RemoteJudgeError(f"Remote judge request failed: {error.reason}") from error
+            raise RemoteJudgeError(f"Remote judge request failed: {error.reason}", retryable=True) from error
         except TimeoutError as error:
-            raise RemoteJudgeError("Remote judge request timed out.") from error
+            raise RemoteJudgeError("Remote judge request timed out.", retryable=True) from error
 
         if len(raw_body) > self.max_response_bytes:
             raise RemoteJudgeError("Remote judge response exceeded the maximum allowed size.")
@@ -111,7 +133,11 @@ class RemoteHttpJudgeClient:
         )
         latency_ms = int((time.monotonic() - started) * 1000)
         if status_code < 200 or status_code >= 300:
-            raise RemoteJudgeError(f"Remote judge returned HTTP {status_code}.")
+            raise RemoteJudgeError(
+                f"Remote judge returned HTTP {status_code}.",
+                status_code=status_code,
+                retryable=_is_retryable_http_error(status_code, ""),
+            )
 
         text = _extract_response_text(raw_response)
         return JudgeRawResponse(
@@ -244,3 +270,34 @@ def _safe_response_message(raw_body: bytes) -> str:
             if isinstance(value, dict) and isinstance(value.get("message"), str):
                 return value["message"][:300]
     return "<response omitted>"
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value.strip())
+    except ValueError:
+        return None
+    if parsed < 0:
+        return None
+    return parsed
+
+
+def _is_retryable_status(status_code: int | None) -> bool:
+    return status_code == 429 or (status_code is not None and 500 <= status_code <= 599)
+
+
+def _is_retryable_http_error(status_code: int | None, message: str) -> bool:
+    if status_code == 429 and _is_daily_token_quota_error(message):
+        return False
+    return _is_retryable_status(status_code)
+
+
+def _is_daily_token_quota_error(message: str) -> bool:
+    normalized = message.lower()
+    return (
+        "tokens per day" in normalized
+        or "(tpd)" in normalized
+        or " on tokens per day " in normalized
+    )

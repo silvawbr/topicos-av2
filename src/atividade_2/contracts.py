@@ -9,10 +9,10 @@ PanelMode = Literal["single", "primary_only", "2plus1"]
 JudgeProvider = Literal["remote_http"]
 JudgeRole = Literal["single", "primary", "arbiter"]
 StoredJudgeRole = Literal["principal", "controle", "arbitro"]
-JudgeExecutionStrategy = Literal["sequential", "parallel"]
+JudgeExecutionStrategy = Literal["sequential", "parallel", "adaptive"]
 
-PROMPT_VERSION = "av2-judge-v1"
-RUBRIC_VERSION = "av2-legal-rubric-v1"
+PROMPT_VERSION = "av2-judge-v3"
+RUBRIC_VERSION = "av2-legal-rubric-v2"
 
 
 @dataclass(frozen=True)
@@ -54,6 +54,12 @@ class JudgeSettings:
     judge_save_raw_response: bool
     judge_execution_strategy: JudgeExecutionStrategy
     judge_batch_size: int
+    judge_adaptive_initial_concurrency: int
+    judge_adaptive_max_concurrency: int
+    judge_adaptive_success_threshold: int
+    judge_adaptive_max_retries: int
+    judge_adaptive_base_backoff_seconds: float
+    judge_adaptive_max_backoff_seconds: float
 
 
 @dataclass(frozen=True)
