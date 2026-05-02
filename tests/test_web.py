@@ -150,6 +150,118 @@ class BlockingRunJudgeService(FakeRunJudgeService):
         )
 
 
+class EvaluationBeforeProgressRunJudgeService(FakeRunJudgeService):
+    event_status = "success"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.evaluation_reported = threading.Event()
+        self.release = threading.Event()
+
+    def run(
+        self,
+        request,
+        *,
+        progress_callback=None,
+        on_resolved=None,
+        eligibility_callback=None,
+        evaluation_callback=None,
+        should_stop=None,
+    ):
+        self.requests.append(request)
+        eligibility = EligibilitySummary(missing=2, failed=0, successful=240, batch_size=2, will_process=2)
+        if eligibility_callback is not None:
+            eligibility_callback(eligibility)
+        if evaluation_callback is not None:
+            evaluation_callback(
+                EvaluationProgress(
+                    status=self.event_status,
+                    dataset="J2",
+                    question_id=10,
+                    answer_id=20,
+                    candidate_model="modelo-candidato",
+                    judge_model="openai/gpt-oss-120b",
+                    role="principal",
+                    panel_mode="single",
+                    trigger_reason="single:single_mode",
+                )
+            )
+        self.evaluation_reported.set()
+        self.release.wait(timeout=2)
+        if progress_callback is not None:
+            progress_callback(
+                BatchProgress(
+                    current=1,
+                    total=2,
+                    percent=50,
+                    executed_evaluations=1,
+                    skipped_evaluations=0,
+                    arbiter_evaluations=0,
+                )
+            )
+        return RunJudgeResult(
+            dry_run=request.dry_run,
+            audit_log=self.audit_path,
+            execution_summary="Judge mode: single",
+            command_preview=".venv/bin/python -m atividade_2.cli run-judge --dataset J2",
+            batch_size=2,
+            eligibility=eligibility,
+            summary=PipelineSummary(
+                selected_answers=2,
+                executed_evaluations=1,
+                skipped_evaluations=0,
+                arbiter_evaluations=0,
+            ),
+        )
+
+
+class RunningEvaluationBeforeProgressRunJudgeService(EvaluationBeforeProgressRunJudgeService):
+    event_status = "running"
+
+
+class FailedRunJudgeService(FakeRunJudgeService):
+    def run(
+        self,
+        request,
+        *,
+        progress_callback=None,
+        on_resolved=None,
+        eligibility_callback=None,
+        evaluation_callback=None,
+        should_stop=None,
+    ):
+        self.requests.append(request)
+        eligibility = EligibilitySummary(missing=2, failed=0, successful=240, batch_size=2, will_process=2)
+        if eligibility_callback is not None:
+            eligibility_callback(eligibility)
+        if evaluation_callback is not None:
+            evaluation_callback(
+                EvaluationProgress(
+                    status="success",
+                    dataset="J2",
+                    question_id=10,
+                    answer_id=20,
+                    candidate_model="modelo-candidato",
+                    judge_model="openai/gpt-oss-120b",
+                    role="principal",
+                    panel_mode="single",
+                    trigger_reason="single:single_mode",
+                )
+            )
+        if progress_callback is not None:
+            progress_callback(
+                BatchProgress(
+                    current=1,
+                    total=2,
+                    percent=50,
+                    executed_evaluations=1,
+                    skipped_evaluations=0,
+                    arbiter_evaluations=0,
+                )
+            )
+        raise RuntimeError("provider unavailable")
+
+
 class SkippedEvaluationRunJudgeService(FakeRunJudgeService):
     def run(
         self,
@@ -212,6 +324,106 @@ class SkippedEvaluationRunJudgeService(FakeRunJudgeService):
                 selected_answers=1,
                 executed_evaluations=1,
                 skipped_evaluations=1,
+                arbiter_evaluations=0,
+            ),
+        )
+
+
+class OutOfOrderEvaluationRunJudgeService(FakeRunJudgeService):
+    def run(
+        self,
+        request,
+        *,
+        progress_callback=None,
+        on_resolved=None,
+        eligibility_callback=None,
+        evaluation_callback=None,
+        should_stop=None,
+    ):
+        self.requests.append(request)
+        eligibility = EligibilitySummary(missing=3, failed=0, successful=240, batch_size=3, will_process=3)
+        if eligibility_callback is not None and not request.dry_run:
+            eligibility_callback(eligibility)
+        if evaluation_callback is not None and not request.dry_run:
+            base_event = {
+                "dataset": "J2",
+                "candidate_model": "modelo-candidato",
+                "judge_model": "openai/gpt-oss-120b",
+                "role": "principal",
+                "panel_mode": "single",
+            }
+            evaluation_callback(
+                EvaluationProgress(
+                    status="success",
+                    question_id=30,
+                    answer_id=300,
+                    trigger_reason="single:success",
+                    score=5,
+                    **base_event,
+                )
+            )
+            evaluation_callback(
+                EvaluationProgress(
+                    status="running",
+                    question_id=20,
+                    answer_id=200,
+                    trigger_reason="single:updated",
+                    **base_event,
+                )
+            )
+            evaluation_callback(
+                EvaluationProgress(
+                    status="success",
+                    question_id=20,
+                    answer_id=200,
+                    trigger_reason="single:updated",
+                    score=4,
+                    **base_event,
+                )
+            )
+            evaluation_callback(
+                EvaluationProgress(
+                    status="failed",
+                    question_id=10,
+                    answer_id=100,
+                    trigger_reason="single:failed",
+                    error="provider timeout",
+                    **base_event,
+                )
+            )
+            evaluation_callback(
+                EvaluationProgress(
+                    status="running",
+                    question_id=40,
+                    answer_id=400,
+                    trigger_reason="single:running",
+                    **base_event,
+                )
+            )
+        if progress_callback is not None:
+            progress_callback(
+                BatchProgress(
+                    current=3,
+                    total=3,
+                    percent=100,
+                    executed_evaluations=3,
+                    skipped_evaluations=0,
+                    arbiter_evaluations=0,
+                )
+            )
+        return RunJudgeResult(
+            dry_run=request.dry_run,
+            audit_log=self.audit_path,
+            execution_summary="Judge mode: single",
+            command_preview=".venv/bin/python -m atividade_2.cli run-judge --dataset J2",
+            batch_size=3,
+            eligibility=None if request.dry_run else eligibility,
+            summary=None
+            if request.dry_run
+            else PipelineSummary(
+                selected_answers=3,
+                executed_evaluations=3,
+                skipped_evaluations=0,
                 arbiter_evaluations=0,
             ),
         )
@@ -515,6 +727,13 @@ def test_web_index_contains_progress_element() -> None:
     assert 'setText("selected", summary?.selected_answers ?? eligibility?.will_process ?? data.progress?.total);' in response.text
     assert 'id="eligible-missing"' in response.text
     assert 'id="execution-table-body"' in response.text
+    assert "execution-row-enter" in response.text
+    assert "execution-row-success" in response.text
+    assert "execution-row-failed" in response.text
+    assert "function animateExecutionRow" in response.text
+    assert 'row.dataset.eventKey = eventKey;' in response.text
+    assert 'if (!statusChanged || !previousRect || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;' in response.text
+    assert 'prefers-reduced-motion: reduce' in response.text
     assert "/api/runs/" in response.text
     assert "Execucoes anteriores" in response.text
     assert 'id="history-table-body"' in response.text
@@ -975,6 +1194,71 @@ def test_run_lifecycle_exposes_batch_progress() -> None:
     assert data["duration"] is not None
 
 
+def test_running_run_progress_updates_when_execution_table_receives_record() -> None:
+    service = EvaluationBeforeProgressRunJudgeService()
+    client = TestClient(create_app(service))
+    token = client.get("/api/config").json()["csrf_token"]
+
+    created = client.post(
+        "/api/runs",
+        headers={"x-csrf-token": token},
+        json={"panel_mode": "single", "dataset": "J2", "batch_size": 2},
+    )
+
+    assert created.status_code == 200
+    assert service.evaluation_reported.wait(timeout=2)
+    data = client.get(f"/api/runs/{created.json()['run_id']}").json()
+    service.release.set()
+
+    assert data["status"] == "running"
+    assert data["progress"]["current"] == 1
+    assert data["progress"]["total"] == 2
+    assert data["progress"]["percent"] == 50
+    assert [event["answer_id"] for event in data["evaluation_events"]] == [20]
+
+
+def test_running_run_progress_ignores_non_success_execution_table_records() -> None:
+    service = RunningEvaluationBeforeProgressRunJudgeService()
+    client = TestClient(create_app(service))
+    token = client.get("/api/config").json()["csrf_token"]
+
+    created = client.post(
+        "/api/runs",
+        headers={"x-csrf-token": token},
+        json={"panel_mode": "single", "dataset": "J2", "batch_size": 2},
+    )
+
+    assert created.status_code == 200
+    assert service.evaluation_reported.wait(timeout=2)
+    data = client.get(f"/api/runs/{created.json()['run_id']}").json()
+    service.release.set()
+
+    assert data["status"] == "running"
+    assert data["progress"]["current"] == 0
+    assert data["progress"]["total"] == 2
+    assert data["progress"]["percent"] == 0
+    assert [event["status"] for event in data["evaluation_events"]] == ["running"]
+
+
+def test_failed_run_reports_complete_process_progress() -> None:
+    client = TestClient(create_app(FailedRunJudgeService()))
+    token = client.get("/api/config").json()["csrf_token"]
+
+    created = client.post(
+        "/api/runs",
+        headers={"x-csrf-token": token},
+        json={"panel_mode": "single", "dataset": "J2", "batch_size": 2},
+    )
+
+    assert created.status_code == 200
+    data = client.get(f"/api/runs/{created.json()['run_id']}").json()
+    assert data["status"] == "failed"
+    assert data["progress"]["current"] == 2
+    assert data["progress"]["total"] == 2
+    assert data["progress"]["percent"] == 100
+    assert data["error"] == "provider unavailable"
+
+
 def test_run_lifecycle_hides_skipped_evaluations_from_execution_table_payload() -> None:
     client = TestClient(create_app(SkippedEvaluationRunJudgeService()))
     token = client.get("/api/config").json()["csrf_token"]
@@ -990,6 +1274,23 @@ def test_run_lifecycle_hides_skipped_evaluations_from_execution_table_payload() 
     assert data["progress"]["skipped_evaluations"] == 1
     assert [event["status"] for event in data["evaluation_events"]] == ["success"]
     assert data["evaluation_events"][0]["role"] == "controle"
+
+
+def test_run_lifecycle_orders_execution_table_payload_by_status_priority() -> None:
+    client = TestClient(create_app(OutOfOrderEvaluationRunJudgeService()))
+    token = client.get("/api/config").json()["csrf_token"]
+
+    created = client.post(
+        "/api/runs",
+        headers={"x-csrf-token": token},
+        json={"panel_mode": "single", "dataset": "J2", "batch_size": 3},
+    )
+
+    assert created.status_code == 200
+    data = client.get(f"/api/runs/{created.json()['run_id']}").json()
+    assert [event["status"] for event in data["evaluation_events"]] == ["running", "failed", "success", "success"]
+    assert [event["question_id"] for event in data["evaluation_events"]] == [40, 10, 30, 20]
+    assert [event["answer_id"] for event in data["evaluation_events"]] == [400, 100, 300, 200]
 
 
 def test_completed_run_progress_falls_back_to_summary_when_callback_is_missing() -> None:

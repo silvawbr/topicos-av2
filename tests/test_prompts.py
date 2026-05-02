@@ -19,10 +19,10 @@ def test_prompt_contains_required_legal_context() -> None:
 
     assert "Elabore a peça cabível." in prompt
     assert "A, porque a regra aplicável exige isso." in prompt
-    assert "Resposta de referência" in prompt
+    assert "Gabarito (Resposta Ouro)" in prompt
     assert "Retorne somente um objeto JSON bruto" in prompt
     assert "Não use markdown" in prompt
-    assert "não recompense verbosidade" in prompt
+    assert "densidade de informação correta" in prompt
 
 
 def test_j2_prompt_uses_binary_multiple_choice_scale() -> None:
@@ -61,7 +61,7 @@ def test_j1_prompt_keeps_ordinal_open_ended_scale() -> None:
         )
     )
 
-    assert "questão aberta" in prompt
-    assert "2 = majoritariamente incorreta" in prompt
-    assert "3 = parcialmente correta" in prompt
+    assert "Rubrica de avaliação (1 a 5)" in prompt
+    assert "Nota 2: Conclusão correta" in prompt
+    assert "Nota 5: Resposta excepcional" in prompt
     assert "Use somente as notas 1 ou 5" not in prompt
