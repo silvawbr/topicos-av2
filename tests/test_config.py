@@ -29,6 +29,12 @@ def test_settings_load_default_models_from_env() -> None:
     assert settings.remote_arbiter_judge_model == "m-prometheus-14b"
     assert settings.judge_execution_strategy == "sequential"
     assert settings.judge_batch_size == 10
+    assert settings.judge_adaptive_initial_concurrency == 2
+    assert settings.judge_adaptive_max_concurrency == 4
+    assert settings.judge_adaptive_success_threshold == 5
+    assert settings.judge_adaptive_max_retries == 3
+    assert settings.judge_adaptive_base_backoff_seconds == 2.0
+    assert settings.judge_adaptive_max_backoff_seconds == 60.0
 
 
 def test_batch_size_can_be_loaded_from_env() -> None:
@@ -168,6 +174,34 @@ def test_execution_strategy_cli_override_wins() -> None:
     )
 
     assert config.execution_strategy == "parallel"
+
+
+def test_adaptive_execution_strategy_is_supported() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_EXECUTION_STRATEGY"] = "adaptive"
+
+    settings = load_settings(dotenv_path=None, env=env)
+    config = resolve_runtime_config(settings, panel_mode="single")
+
+    assert settings.judge_execution_strategy == "adaptive"
+    assert config.execution_strategy == "adaptive"
+
+
+def test_invalid_adaptive_initial_concurrency_fails() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_ADAPTIVE_INITIAL_CONCURRENCY"] = "0"
+
+    with pytest.raises(ConfigurationError, match="JUDGE_ADAPTIVE_INITIAL_CONCURRENCY"):
+        load_settings(dotenv_path=None, env=env)
+
+
+def test_adaptive_initial_concurrency_cannot_exceed_max() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_ADAPTIVE_INITIAL_CONCURRENCY"] = "5"
+    env["JUDGE_ADAPTIVE_MAX_CONCURRENCY"] = "4"
+
+    with pytest.raises(ConfigurationError, match="INITIAL_CONCURRENCY"):
+        load_settings(dotenv_path=None, env=env)
 
 
 def test_invalid_execution_strategy_fails() -> None:

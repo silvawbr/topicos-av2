@@ -83,6 +83,37 @@ def test_dry_run_does_not_connect_to_database(tmp_path) -> None:
     assert "--dry-run" in result.command_preview
 
 
+def test_preflight_report_does_not_connect_to_database(tmp_path) -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_EXECUTION_STRATEGY"] = "adaptive"
+
+    def fail_connect(database_url: str):
+        raise AssertionError("preflight report must not connect to PostgreSQL")
+
+    service = RunJudgeService(
+        settings_loader=lambda: load_settings(dotenv_path=None, env=env),
+        connect_func=fail_connect,
+    )
+
+    result = service.run(
+        RunJudgeRequest(
+            panel_mode="2plus1",
+            batch_size=2,
+            preflight_report=True,
+            audit_log=str(tmp_path / "preflight.log"),
+            no_audit_animation=True,
+        )
+    )
+
+    assert result.summary is None
+    assert result.preflight_report is not None
+    assert "Preflight report:" in result.preflight_report
+    assert "Execution strategy: adaptive" in result.preflight_report
+    assert "Priority order: judge_1 -> judge_2 -> arbiter" in result.preflight_report
+    assert "test-key" not in result.preflight_report
+    assert "--preflight-report" in result.command_preview
+
+
 def test_describe_config_is_secret_safe() -> None:
     service = RunJudgeService(settings_loader=lambda: load_settings(dotenv_path=None, env=BASE_ENV))
 
@@ -133,6 +164,55 @@ def test_resolve_applies_web_endpoint_and_advanced_overrides() -> None:
     assert settings.remote_judge_max_tokens == 4000
     assert settings.judge_save_raw_response is False
     assert "key-" not in resolved.command_preview
+
+
+def test_resolve_copies_primary_env_endpoint_to_secondary() -> None:
+    service = RunJudgeService(settings_loader=lambda: load_settings(dotenv_path=None, env=BASE_ENV))
+
+    resolved = service.resolve(
+        RunJudgeRequest(
+            panel_mode="2plus1",
+            endpoint_source_secondary="judge",
+        )
+    )
+
+    secondary = resolved.runtime_config.settings.remote_judge_endpoints["SECONDARY_JUDGE"]
+    assert secondary.base_url == "https://example.invalid/v1"
+    assert secondary.api_key == "test-key"
+    assert "test-key" not in resolved.command_preview
+
+
+def test_resolve_copies_secondary_endpoint_to_arbiter() -> None:
+    service = RunJudgeService(settings_loader=lambda: load_settings(dotenv_path=None, env=BASE_ENV))
+
+    resolved = service.resolve(
+        RunJudgeRequest(
+            panel_mode="2plus1",
+            remote_secondary_judge_base_url="https://judge2.example.invalid/v1",
+            remote_secondary_judge_api_key="key-2",
+            endpoint_source_arbiter="secondary",
+        )
+    )
+
+    settings = resolved.runtime_config.settings
+    assert settings.remote_judge_endpoints["ARBITER"].base_url == "https://judge2.example.invalid/v1"
+    assert settings.remote_judge_endpoints["ARBITER"].api_key == "key-2"
+    assert "key-2" not in resolved.command_preview
+
+
+def test_web_false_always_run_arbiter_overrides_env_true() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_ALWAYS_RUN_ARBITER"] = "true"
+    service = RunJudgeService(settings_loader=lambda: load_settings(dotenv_path=None, env=env))
+
+    resolved = service.resolve(
+        RunJudgeRequest(
+            panel_mode="2plus1",
+            always_run_arbiter=False,
+        )
+    )
+
+    assert resolved.runtime_config.always_run_arbiter is False
 
 
 def test_endpoint_override_requires_url_and_key_together() -> None:

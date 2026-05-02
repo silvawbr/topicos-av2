@@ -20,7 +20,7 @@ from .model_aliases import resolve_judge_model
 DEFAULT_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/app_dev"
 SUPPORTED_PANEL_MODES: set[str] = {"single", "primary_only", "2plus1"}
 SUPPORTED_PROVIDERS: set[str] = {"remote_http"}
-SUPPORTED_EXECUTION_STRATEGIES: set[str] = {"sequential", "parallel"}
+SUPPORTED_EXECUTION_STRATEGIES: set[str] = {"sequential", "parallel", "adaptive"}
 
 
 class ConfigurationError(ValueError):
@@ -68,6 +68,23 @@ def load_settings(dotenv_path: str | Path | None = ".env", env: Mapping[str, str
         SUPPORTED_EXECUTION_STRATEGIES,
     )
 
+    adaptive_initial_concurrency = _parse_int(
+        values,
+        "JUDGE_ADAPTIVE_INITIAL_CONCURRENCY",
+        2,
+        minimum=1,
+    )
+    adaptive_max_concurrency = _parse_int(
+        values,
+        "JUDGE_ADAPTIVE_MAX_CONCURRENCY",
+        4,
+        minimum=1,
+    )
+    if adaptive_initial_concurrency > adaptive_max_concurrency:
+        raise ConfigurationError(
+            "JUDGE_ADAPTIVE_INITIAL_CONCURRENCY must be <= JUDGE_ADAPTIVE_MAX_CONCURRENCY."
+        )
+
     return JudgeSettings(
         database_url=values.get("DATABASE_URL", DEFAULT_DATABASE_URL),
         judge_provider=provider,  # type: ignore[arg-type]
@@ -88,6 +105,27 @@ def load_settings(dotenv_path: str | Path | None = ".env", env: Mapping[str, str
         judge_save_raw_response=_parse_bool(values, "JUDGE_SAVE_RAW_RESPONSE", True),
         judge_execution_strategy=execution_strategy,  # type: ignore[arg-type]
         judge_batch_size=_parse_int(values, "JUDGE_BATCH_SIZE", 10, minimum=1),
+        judge_adaptive_initial_concurrency=adaptive_initial_concurrency,
+        judge_adaptive_max_concurrency=adaptive_max_concurrency,
+        judge_adaptive_success_threshold=_parse_int(
+            values,
+            "JUDGE_ADAPTIVE_SUCCESS_THRESHOLD",
+            5,
+            minimum=1,
+        ),
+        judge_adaptive_max_retries=_parse_int(values, "JUDGE_ADAPTIVE_MAX_RETRIES", 3, minimum=0),
+        judge_adaptive_base_backoff_seconds=_parse_float(
+            values,
+            "JUDGE_ADAPTIVE_BASE_BACKOFF_SECONDS",
+            2.0,
+            minimum=0.0,
+        ),
+        judge_adaptive_max_backoff_seconds=_parse_float(
+            values,
+            "JUDGE_ADAPTIVE_MAX_BACKOFF_SECONDS",
+            60.0,
+            minimum=0.0,
+        ),
     )
 
 
@@ -99,7 +137,7 @@ def resolve_runtime_config(
     judge_model: str | None = None,
     secondary_judge_model: str | None = None,
     arbiter_judge_model: str | None = None,
-    always_run_arbiter: bool = False,
+    always_run_arbiter: bool | None = None,
     execution_strategy: str | None = None,
 ) -> RuntimeJudgeConfig:
     """Resolve effective judge mode/model/panel using CLI-over-env precedence."""
@@ -160,7 +198,11 @@ def resolve_runtime_config(
         primary_panel=primary_panel,
         arbiter=arbiter,
         arbitration_min_delta=settings.judge_arbitration_min_delta,
-        always_run_arbiter=always_run_arbiter or settings.judge_always_run_arbiter,
+        always_run_arbiter=(
+            settings.judge_always_run_arbiter
+            if always_run_arbiter is None
+            else always_run_arbiter
+        ),
         execution_strategy=effective_strategy,
         settings=settings,
         model_source=_panel_model_source(judge_model, secondary_judge_model, arbiter_judge_model),
@@ -186,7 +228,7 @@ def _resolve_execution_strategy(
     if effective_strategy not in SUPPORTED_EXECUTION_STRATEGIES:
         raise ConfigurationError(
             "Unsupported judge execution strategy: "
-            f"{effective_strategy}. Supported values: sequential, parallel."
+            f"{effective_strategy}. Supported values: adaptive, sequential, parallel."
         )
     return effective_strategy  # type: ignore[return-value]
 

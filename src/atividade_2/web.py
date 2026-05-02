@@ -39,7 +39,7 @@ class RunPayload(BaseModel):
     panel_mode: Literal["single", "primary_only", "2plus1"] | None = None
     dataset: Literal["J1", "J2", "OAB_Bench", "OAB_Exames"] = "J2"
     batch_size: int | None = Field(default=None, ge=1)
-    judge_execution_strategy: Literal["sequential", "parallel"] | None = None
+    judge_execution_strategy: Literal["sequential", "parallel", "adaptive"] | None = None
     judge_model: str | None = None
     secondary_judge_model: str | None = None
     arbiter_judge_model: str | None = None
@@ -50,6 +50,9 @@ class RunPayload(BaseModel):
     remote_secondary_judge_api_key: str | None = None
     remote_arbiter_judge_base_url: str | None = None
     remote_arbiter_judge_api_key: str | None = None
+    endpoint_source_judge: Literal["env", "custom"] | None = None
+    endpoint_source_secondary: Literal["env", "judge", "custom"] | None = None
+    endpoint_source_arbiter: Literal["env", "judge", "secondary", "custom"] | None = None
     judge_arbitration_min_delta: int | None = Field(default=None, ge=0)
     remote_judge_timeout_seconds: int | None = Field(default=None, ge=1)
     remote_judge_temperature: float | None = Field(default=None, ge=0)
@@ -74,6 +77,9 @@ class RunPayload(BaseModel):
             remote_secondary_judge_api_key=self.remote_secondary_judge_api_key or None,
             remote_arbiter_judge_base_url=self.remote_arbiter_judge_base_url or None,
             remote_arbiter_judge_api_key=self.remote_arbiter_judge_api_key or None,
+            endpoint_source_judge=self.endpoint_source_judge,
+            endpoint_source_secondary=self.endpoint_source_secondary,
+            endpoint_source_arbiter=self.endpoint_source_arbiter,
             judge_arbitration_min_delta=self.judge_arbitration_min_delta,
             remote_judge_timeout_seconds=self.remote_judge_timeout_seconds,
             remote_judge_temperature=self.remote_judge_temperature,
@@ -187,6 +193,8 @@ class JobRegistry:
                 self._jobs[run_id].eligibility = eligibility
 
         def update_evaluation(evaluation: EvaluationProgress) -> None:
+            if evaluation.status == "skipped":
+                return
             with self._lock:
                 _upsert_evaluation_event(self._jobs[run_id].evaluation_events, evaluation)
 
@@ -238,12 +246,19 @@ def create_app(
     app.state.database_reset_service = database_reset_service or DatabaseResetService()
 
     @app.get("/", response_class=HTMLResponse)
-    def index() -> str:
-        return _INDEX_HTML
+    def index() -> HTMLResponse:
+        return HTMLResponse(_INDEX_HTML, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/config")
     def get_config(request: Request) -> dict:
         config = request.app.state.jobs.service.describe_config()
+        defaults = config.get("defaults") or {}
+        configured_models = [
+            defaults.get("judge_model"),
+            defaults.get("secondary_judge_model"),
+            defaults.get("arbiter_judge_model"),
+        ]
+        config["judge_model_options"] = list(dict.fromkeys(model for model in configured_models if model))
         config["csrf_token"] = request.app.state.csrf_token
         return config
 
@@ -408,6 +423,9 @@ def _require_csrf(request: Request) -> None:
 
 
 def _serialize_job(job: JobState) -> dict:
+    eligibility = job.eligibility
+    if eligibility is None and job.result is not None:
+        eligibility = job.result.eligibility
     return {
         "run_id": job.run_id,
         "status": job.status,
@@ -415,15 +433,39 @@ def _serialize_job(job: JobState) -> dict:
         "finished_at": job.finished_at.isoformat() if job.finished_at is not None else None,
         "duration_seconds": _duration_seconds(job.started_at, job.finished_at, 0),
         "duration": _format_duration(_duration_seconds(job.started_at, job.finished_at, 0)),
-        "progress": asdict(job.progress),
+        "progress": asdict(_effective_progress(job, eligibility)),
         "audit_log": job.audit_log,
         "audit_log_url": f"/api/runs/{job.run_id}/audit-log" if job.audit_log else None,
         "command_preview": job.command_preview,
-        "eligibility": asdict(job.eligibility) if job.eligibility is not None else None,
+        "eligibility": asdict(eligibility) if eligibility is not None else None,
         "evaluation_events": [asdict(event) for event in job.evaluation_events],
         "error": job.error,
         "result": _serialize_result(job.result) if job.result is not None else None,
     }
+
+
+def _effective_progress(job: JobState, eligibility: EligibilitySummary | None) -> BatchProgress:
+    if job.result is not None and job.result.summary is not None:
+        summary = job.result.summary
+        total = summary.selected_answers
+        return BatchProgress(
+            current=total,
+            total=total,
+            percent=100,
+            executed_evaluations=summary.executed_evaluations,
+            skipped_evaluations=summary.skipped_evaluations,
+            arbiter_evaluations=summary.arbiter_evaluations,
+        )
+    if eligibility is not None and job.progress.total == 0:
+        return BatchProgress(
+            current=0,
+            total=eligibility.will_process,
+            percent=0,
+            executed_evaluations=job.progress.executed_evaluations,
+            skipped_evaluations=job.progress.skipped_evaluations,
+            arbiter_evaluations=job.progress.arbiter_evaluations,
+        )
+    return job.progress
 
 
 def _serialize_result(result: RunJudgeResult) -> dict:
@@ -727,11 +769,11 @@ _INDEX_HTML = """
     .chart { border:1px solid var(--line); border-radius:8px; padding:12px; min-width:0; }
     .chart h3 { margin:0 0 10px; font-size:13px; }
     .carousel-card { border:1px solid #b9d5eb; border-radius:8px; padding:12px; margin:0 0 14px; background:#fff; overflow:hidden; box-shadow:0 8px 22px rgba(23,105,170,.08); }
-    .carousel-head { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; padding-bottom:10px; border-bottom:1px solid var(--line); }
-    .carousel-controls { display:flex; align-items:center; gap:8px; }
+    .carousel-head { display:flex; justify-content:space-between; align-items:center; gap:12px; min-width:0; margin-bottom:12px; padding-bottom:10px; border-bottom:1px solid var(--line); }
+    .carousel-controls { flex:0 0 auto; display:flex; align-items:center; gap:8px; }
     .carousel-button { width:38px; min-height:34px; padding:0; border-color:#b9d5eb; background:#f2f8fd; color:var(--accent); font-size:20px; line-height:1; }
-    .carousel-tabs { display:flex; align-items:center; gap:6px; min-width:0; overflow:auto; }
-    .carousel-tab { min-height:36px; padding:0 12px; border-color:var(--line); background:#fff; color:var(--muted); font-size:13px; font-weight:750; white-space:nowrap; }
+    .carousel-tabs { flex:1 1 auto; display:flex; align-items:center; gap:6px; min-width:0; max-width:100%; overflow-x:auto; overflow-y:hidden; scroll-behavior:smooth; scroll-padding-left:8px; scroll-padding-right:8px; scrollbar-width:thin; }
+    .carousel-tab { flex:0 0 auto; min-height:36px; padding:0 12px; border-color:var(--line); background:#fff; color:var(--muted); font-size:13px; font-weight:750; white-space:nowrap; }
     .carousel-tab.active { border-color:var(--accent); background:var(--accent); color:#fff; box-shadow:0 6px 14px rgba(23,105,170,.24); }
     .carousel-viewport { width:100%; overflow:hidden; touch-action:pan-y; }
     .carousel-track { display:flex; gap:0; width:100%; transform:translateX(0); transition:transform .24s ease; }
@@ -1006,12 +1048,12 @@ _INDEX_HTML = """
         </label>
       </div>
       <label>Estrategia
-        <select id="judge_execution_strategy"><option>sequential</option><option>parallel</option></select>
+        <select id="judge_execution_strategy"><option>sequential</option><option>parallel</option><option>adaptive</option></select>
       </label>
-      <div class="hint">Sequential e melhor para endpoint local ou fragil. Parallel e indicado para endpoint remoto que aceita concorrencia.</div>
-      <div class="judge-block">
+      <div class="hint">Sequential e melhor para endpoint local ou fragil. Parallel usa concorrencia fixa por resposta. Adaptive ajusta concorrencia por endpoint/modelo.</div>
+      <div id="judge_block" class="judge-block" data-judge-block="judge">
       <label>Juiz 1 - modelo
-        <input id="judge_model" autocomplete="off">
+        <select id="judge_model"></select>
       </label>
       <label>Endpoint do juiz 1
         <select id="endpoint_source_judge"><option value="env">Usar .env</option><option value="custom">Config propria</option></select>
@@ -1028,9 +1070,9 @@ _INDEX_HTML = """
       </label>
       </div>
       </div>
-      <div class="judge-block">
+      <div id="secondary_block" class="judge-block" data-judge-block="secondary">
       <label>Juiz 2 - modelo
-        <input id="secondary_judge_model" autocomplete="off">
+        <select id="secondary_judge_model"></select>
       </label>
       <label>Endpoint do juiz 2
         <select id="endpoint_source_secondary"><option value="env">Usar .env</option><option value="judge">Copiar do juiz 1</option><option value="custom">Config propria</option></select>
@@ -1047,9 +1089,9 @@ _INDEX_HTML = """
       </label>
       </div>
       </div>
-      <div class="judge-block">
+      <div id="arbiter_block" class="judge-block" data-judge-block="arbiter">
       <label>Arbitro - modelo
-        <input id="arbiter_judge_model" autocomplete="off">
+        <select id="arbiter_judge_model"></select>
       </label>
       <label>Endpoint do arbitro
         <select id="endpoint_source_arbiter"><option value="env">Usar .env</option><option value="judge">Copiar do juiz 1</option><option value="secondary">Copiar do juiz 2</option><option value="custom">Config propria</option></select>
@@ -1066,10 +1108,10 @@ _INDEX_HTML = """
       </label>
       </div>
       </div>
-      <label class="inline"><input id="judge_save_raw_response" type="checkbox"> Salvar resposta bruta do juiz</label>
+      <label class="inline"><input id="always_run_arbiter" type="checkbox"> Rodar arbitro sempre <span class="warn">aumenta custo e chamadas remotas</span></label>
       <details>
         <summary>Campos avancados</summary>
-        <label class="inline"><input id="always_run_arbiter" type="checkbox"> Rodar arbitro sempre <span class="warn">aumenta custo e chamadas remotas</span></label>
+        <label class="inline"><input id="judge_save_raw_response" type="checkbox"> Salvar resposta bruta do juiz</label>
         <div class="row">
           <label>Timeout (s)
             <input id="remote_judge_timeout_seconds" type="number" min="1">
@@ -1278,6 +1320,7 @@ _INDEX_HTML = """
     let dashboardLoaded = false;
     let currentAuditLogUrl = null;
     let activeRunId = null;
+    let judgeModelOptions = [];
 
     function value(id) { return document.getElementById(id).value; }
     function setText(id, text) { document.getElementById(id).textContent = text ?? "-"; }
@@ -1289,9 +1332,11 @@ _INDEX_HTML = """
         ["REMOTE_JUDGE_BASE_URL is required", "Configure a URL do endpoint do juiz"],
         ["REMOTE_JUDGE_API_KEY is required", "Configure a key local; não commitar"],
         ["invalid JSON", "O modelo não respeitou o contrato de saída"],
+        ["gated model", "Modelo sem acesso neste provedor"],
+        ["don't have access", "Modelo sem acesso neste provedor"],
         ["model does not exist", "Modelo inválido ou sem acesso nesse provedor"],
         ["HTTP 401", "key inválida ou sem permissão"],
-        ["HTTP 403", "key inválida ou sem permissão"],
+        ["HTTP 403", "acesso negado pelo provedor"],
         ["HTTP 404", "base URL/modelo incorreto"]
       ];
       for (const [needle, friendly] of mappings) {
@@ -1373,6 +1418,50 @@ _INDEX_HTML = """
         option.selected = selectedSet.has(value);
         select.appendChild(option);
       }
+    }
+
+    function visibleModelSelectIds() {
+      const mode = value("panel_mode");
+      if (mode === "single") return ["judge_model"];
+      if (mode === "primary_only") return ["judge_model", "secondary_judge_model"];
+      return ["judge_model", "secondary_judge_model", "arbiter_judge_model"];
+    }
+
+    function renderJudgeModelSelects() {
+      const visibleIds = new Set(visibleModelSelectIds());
+      const chosenBySelect = {};
+      for (const id of ["judge_model", "secondary_judge_model", "arbiter_judge_model"]) {
+        chosenBySelect[id] = value(id);
+      }
+      for (const id of ["judge_model", "secondary_judge_model", "arbiter_judge_model"]) {
+        const select = document.getElementById(id);
+        const selected = chosenBySelect[id];
+        select.textContent = "";
+        for (const model of judgeModelOptions) {
+          const selectedElsewhere = Object.entries(chosenBySelect).some(([otherId, otherValue]) => (
+            otherId !== id && visibleIds.has(otherId) && otherValue === model
+          ));
+          if (selectedElsewhere) continue;
+          const option = document.createElement("option");
+          option.value = model;
+          option.textContent = model;
+          option.selected = model === selected;
+          select.appendChild(option);
+        }
+        if (selected && Array.from(select.options).some((option) => option.value === selected)) {
+          select.value = selected;
+        } else if (select.options.length) {
+          select.selectedIndex = 0;
+        }
+      }
+    }
+
+    function renderJudgeBlocks() {
+      const mode = value("panel_mode");
+      document.getElementById("judge_block").hidden = false;
+      document.getElementById("secondary_block").hidden = mode === "single";
+      document.getElementById("arbiter_block").hidden = mode !== "2plus1";
+      renderJudgeModelSelects();
     }
 
     function renderDashboardCards(cards) {
@@ -1785,7 +1874,40 @@ _INDEX_HTML = """
         tab.classList.toggle("active", tabIndex === index);
         tab.setAttribute("aria-selected", String(tabIndex === index));
       }
+      scrollCarouselTabsIntoView(index);
       updateCarouselControls(index, cards.length);
+    }
+
+    function scrollCarouselTabsIntoView(index) {
+      const root = document.getElementById("dashboard-model-carousel-dots");
+      const tabs = Array.from(root.children);
+      if (!tabs.length || root.scrollWidth <= root.clientWidth) return;
+      if (index <= 1) {
+        root.scrollTo({left: 0, behavior: "auto"});
+        return;
+      }
+      const firstVisibleIndex = Math.max(0, index - 1);
+      const lastVisibleIndex = Math.min(tabs.length - 1, index + 1);
+      const activeTab = tabs[index];
+      const firstTab = tabs[firstVisibleIndex];
+      const lastTab = tabs[lastVisibleIndex];
+      const padding = 8;
+      const targetLeft = firstTab.offsetLeft - padding;
+      const targetRight = lastTab.offsetLeft + lastTab.offsetWidth + padding;
+      const targetSpan = targetRight - targetLeft;
+      const maxScrollLeft = Math.max(0, root.scrollWidth - root.clientWidth);
+      let desiredLeft = targetLeft - Math.max(0, root.clientWidth - targetSpan) / 2;
+      if (targetSpan > root.clientWidth) {
+        activeTab.scrollIntoView({behavior: "smooth", block: "nearest", inline: "start"});
+        return;
+      }
+      root.scrollTo({left: Math.min(maxScrollLeft, Math.max(0, desiredLeft)), behavior: "smooth"});
+    }
+
+    function resetCarouselTabsScroll() {
+      const root = document.getElementById("dashboard-model-carousel-dots");
+      root.scrollLeft = 0;
+      scrollCarouselTabsIntoView(dashboardCarouselIndex);
     }
 
     function updateCarouselControls(index, total) {
@@ -1891,7 +2013,9 @@ _INDEX_HTML = """
     }
 
     function payload() {
-      applyEndpointSources();
+      const judgeEndpointSource = value("endpoint_source_judge");
+      const secondaryEndpointSource = value("endpoint_source_secondary");
+      const arbiterEndpointSource = value("endpoint_source_arbiter");
       return {
         panel_mode: value("panel_mode"),
         dataset: value("dataset"),
@@ -1901,12 +2025,15 @@ _INDEX_HTML = """
         secondary_judge_model: value("secondary_judge_model"),
         arbiter_judge_model: value("arbiter_judge_model"),
         always_run_arbiter: document.getElementById("always_run_arbiter").checked,
-        remote_judge_base_url: value("remote_judge_base_url"),
-        remote_judge_api_key: value("remote_judge_api_key"),
-        remote_secondary_judge_base_url: value("remote_secondary_judge_base_url"),
-        remote_secondary_judge_api_key: value("remote_secondary_judge_api_key"),
-        remote_arbiter_judge_base_url: value("remote_arbiter_judge_base_url"),
-        remote_arbiter_judge_api_key: value("remote_arbiter_judge_api_key"),
+        remote_judge_base_url: judgeEndpointSource === "custom" ? value("remote_judge_base_url") : "",
+        remote_judge_api_key: judgeEndpointSource === "custom" ? value("remote_judge_api_key") : "",
+        remote_secondary_judge_base_url: secondaryEndpointSource === "custom" ? value("remote_secondary_judge_base_url") : "",
+        remote_secondary_judge_api_key: secondaryEndpointSource === "custom" ? value("remote_secondary_judge_api_key") : "",
+        remote_arbiter_judge_base_url: arbiterEndpointSource === "custom" ? value("remote_arbiter_judge_base_url") : "",
+        remote_arbiter_judge_api_key: arbiterEndpointSource === "custom" ? value("remote_arbiter_judge_api_key") : "",
+        endpoint_source_judge: judgeEndpointSource,
+        endpoint_source_secondary: secondaryEndpointSource,
+        endpoint_source_arbiter: arbiterEndpointSource,
         judge_arbitration_min_delta: optionalNumber("judge_arbitration_min_delta"),
         remote_judge_timeout_seconds: optionalNumber("remote_judge_timeout_seconds"),
         remote_judge_temperature: optionalNumber("remote_judge_temperature"),
@@ -1974,7 +2101,7 @@ _INDEX_HTML = """
       setText("eligible-successful", eligibility?.successful);
       setText("eligible-will-process", eligibility?.will_process);
       const summary = data.result?.summary;
-      setText("selected", summary?.selected_answers);
+      setText("selected", summary?.selected_answers ?? eligibility?.will_process ?? data.progress?.total);
       setText("executed", summary?.executed_evaluations ?? data.progress?.executed_evaluations);
       setText("skipped", summary?.skipped_evaluations ?? data.progress?.skipped_evaluations);
       setText("arbiters", summary?.arbiter_evaluations ?? data.progress?.arbiter_evaluations);
@@ -2178,7 +2305,7 @@ _INDEX_HTML = """
           formatBoolean(event.arbiter_triggered),
           event.trigger_reason,
           formatLatency(event.latency_ms),
-          friendlyErrorMessage(event.error)
+          event.error ? friendlyErrorMessage(event.error) : null
         ]) appendCell(row, display(value));
         const detailsCell = document.createElement("td");
         const button = document.createElement("button");
@@ -2258,7 +2385,24 @@ _INDEX_HTML = """
     }
 
     async function poll(runId) {
-      const data = await (await fetch(`/api/runs/${runId}`)).json();
+      let response;
+      try {
+        response = await fetch(`/api/runs/${runId}`, {cache: "no-store"});
+      } catch (error) {
+        setText("output", `Falha ao atualizar execucao: ${friendlyErrorMessage(error.message)}`);
+        return;
+      }
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setText("output", data.detail || "Falha ao atualizar execucao.");
+        if (response.status === 404 && pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+          activeRunId = null;
+          updateStopButton(null, "idle");
+        }
+        return;
+      }
       renderRun(data);
       if (["completed", "failed", "cancelled"].includes(data.status) && pollTimer) {
         clearInterval(pollTimer);
@@ -2356,7 +2500,7 @@ _INDEX_HTML = """
       for (const panel of document.querySelectorAll(".tab-panel")) {
         panel.hidden = panel.id !== targetId;
       }
-      if (targetId === "dashboard-panel" && !dashboardLoaded) loadDashboard();
+      if (targetId === "dashboard-panel") loadDashboard();
       if (targetId === "history-panel" && !historyLoaded) loadHistory();
     }
 
@@ -2364,10 +2508,22 @@ _INDEX_HTML = """
       const config = await (await fetch("/api/config")).json();
       csrfToken = config.csrf_token;
       const defaults = config.defaults || {};
-      for (const key of ["panel_mode", "dataset", "batch_size", "judge_execution_strategy", "judge_model", "secondary_judge_model", "arbiter_judge_model", "judge_arbitration_min_delta", "remote_judge_timeout_seconds", "remote_judge_temperature", "remote_judge_max_tokens", "remote_judge_top_p"]) {
+      judgeModelOptions = config.judge_model_options || [defaults.judge_model, defaults.secondary_judge_model, defaults.arbiter_judge_model].filter(Boolean);
+      for (const key of ["panel_mode", "dataset", "batch_size", "judge_execution_strategy", "judge_arbitration_min_delta", "remote_judge_timeout_seconds", "remote_judge_temperature", "remote_judge_max_tokens", "remote_judge_top_p"]) {
         if (defaults[key] !== null && defaults[key] !== undefined) document.getElementById(key).value = defaults[key];
       }
-      document.getElementById("always_run_arbiter").checked = Boolean(defaults.always_run_arbiter);
+      for (const key of ["judge_model", "secondary_judge_model", "arbiter_judge_model"]) {
+        const model = defaults[key];
+        if (model && !judgeModelOptions.includes(model)) judgeModelOptions.push(model);
+        if (model) document.getElementById(key).dataset.defaultValue = model;
+      }
+      renderJudgeModelSelects();
+      for (const key of ["judge_model", "secondary_judge_model", "arbiter_judge_model"]) {
+        const model = document.getElementById(key).dataset.defaultValue;
+        if (model) document.getElementById(key).value = model;
+      }
+      renderJudgeModelSelects();
+      document.getElementById("always_run_arbiter").checked = false;
       document.getElementById("judge_save_raw_response").checked = Boolean(defaults.judge_save_raw_response);
       document.getElementById("remote_judge_openai_compatible").value = String(Boolean(defaults.remote_judge_openai_compatible));
       setText("config-status", config.configuration_error || `Endpoints: juiz 1 ${config.endpoints?.JUDGE?.host || "-"} / juiz 2 ${config.endpoints?.SECONDARY_JUDGE?.host || "-"}`);
@@ -2383,26 +2539,15 @@ _INDEX_HTML = """
             if (key === "always_run_arbiter") document.getElementById(key).checked = Boolean(val);
             else document.getElementById(key).value = val;
           }
+          renderJudgeBlocks();
         };
         presetRoot.appendChild(btn);
       }
+      renderJudgeBlocks();
       renderEndpointFields();
       document.getElementById("dry-run").disabled = false;
       document.getElementById("run").disabled = false;
       await loadDashboard();
-    }
-
-    function copyEndpointValues(source, target) {
-      const sourcePrefix = source === "secondary" ? "remote_secondary_judge" : "remote_judge";
-      const targetPrefix = target === "arbiter" ? "remote_arbiter_judge" : "remote_secondary_judge";
-      document.getElementById(`${targetPrefix}_base_url`).value = document.getElementById(`${sourcePrefix}_base_url`).value;
-      document.getElementById(`${targetPrefix}_api_key`).value = document.getElementById(`${sourcePrefix}_api_key`).value;
-    }
-
-    function clearEndpoint(target) {
-      const prefix = target === "judge" ? "remote_judge" : `remote_${target}_judge`;
-      document.getElementById(`${prefix}_base_url`).value = "";
-      document.getElementById(`${prefix}_api_key`).value = "";
     }
 
     function renderEndpointFields() {
@@ -2411,22 +2556,14 @@ _INDEX_HTML = """
       }
     }
 
-    function applyEndpointSources() {
-      const secondarySource = value("endpoint_source_secondary");
-      const arbiterSource = value("endpoint_source_arbiter");
-      if (value("endpoint_source_judge") === "env") clearEndpoint("judge");
-      if (secondarySource === "env") clearEndpoint("secondary");
-      else if (secondarySource === "judge") copyEndpointValues("judge", "secondary");
-      if (arbiterSource === "env") clearEndpoint("arbiter");
-      else if (arbiterSource === "judge") copyEndpointValues("judge", "arbiter");
-      else if (arbiterSource === "secondary") copyEndpointValues("secondary", "arbiter");
-    }
-
     for (const id of ["endpoint_source_judge", "endpoint_source_secondary", "endpoint_source_arbiter"]) {
       document.getElementById(id).onchange = () => {
-        applyEndpointSources();
         renderEndpointFields();
       };
+    }
+    document.getElementById("panel_mode").onchange = renderJudgeBlocks;
+    for (const id of ["judge_model", "secondary_judge_model", "arbiter_judge_model"]) {
+      document.getElementById(id).onchange = renderJudgeModelSelects;
     }
 
     for (const button of document.querySelectorAll("[data-toggle-secret]")) {
@@ -2486,6 +2623,8 @@ _INDEX_HTML = """
       tab.onclick = () => goToCarouselPage(Number(tab.dataset.carouselIndex));
     }
     updateCarouselState();
+    resetCarouselTabsScroll();
+    requestAnimationFrame(resetCarouselTabsScroll);
     document.getElementById("dashboard-clear").onclick = () => {
       document.getElementById("dashboard_dataset").value = "J1";
       document.getElementById("dashboard_status").value = "all";

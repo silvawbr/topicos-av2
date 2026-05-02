@@ -146,36 +146,68 @@ class JudgeRepository:
                 f"""
                 WITH required_evaluations(id_modelo_juiz, papel_juiz, motivo_pattern) AS (
                     VALUES {values_sql}
+                ),
+                pending_by_required AS (
+                    SELECT
+                        r.id_resposta,
+                        p.id_pergunta,
+                        d.nome_dataset,
+                        p.enunciado,
+                        p.resposta_ouro,
+                        r.texto_resposta,
+                        m.nome_modelo,
+                        COALESCE(p.metadados, '{{}}'::jsonb) AS metadados,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY
+                                required.id_modelo_juiz,
+                                required.papel_juiz,
+                                required.motivo_pattern
+                            ORDER BY p.id_pergunta, m.nome_modelo, r.id_resposta
+                        ) AS required_rank
+                    FROM respostas_atividade_1 r
+                    JOIN perguntas p ON p.id_pergunta = r.id_pergunta
+                    JOIN datasets d ON d.id_dataset = p.id_dataset
+                    JOIN modelos m ON m.id_modelo = r.id_modelo
+                    CROSS JOIN required_evaluations required
+                    WHERE d.nome_dataset = %s
+                      AND NOT EXISTS (
+                              SELECT 1
+                              FROM avaliacoes_juiz a
+                              WHERE a.id_resposta_ativa1 = r.id_resposta
+                                AND a.id_modelo_juiz = required.id_modelo_juiz
+                                AND COALESCE(a.papel_juiz, '') = required.papel_juiz
+                                AND COALESCE(a.motivo_acionamento, '') LIKE required.motivo_pattern
+                                AND COALESCE(a.status_avaliacao, 'success') = 'success'
+                          )
+                ),
+                selected_answers AS (
+                    SELECT DISTINCT ON (id_resposta)
+                        id_resposta,
+                        id_pergunta,
+                        nome_dataset,
+                        enunciado,
+                        resposta_ouro,
+                        texto_resposta,
+                        nome_modelo,
+                        metadados
+                    FROM pending_by_required
+                    WHERE required_rank <= %s
+                    ORDER BY id_resposta
                 )
                 SELECT
-                    r.id_resposta,
-                    p.id_pergunta,
-                    d.nome_dataset,
-                    p.enunciado,
-                    p.resposta_ouro,
-                    r.texto_resposta,
-                    m.nome_modelo,
-                    COALESCE(p.metadados, '{{}}'::jsonb)
-                FROM respostas_atividade_1 r
-                JOIN perguntas p ON p.id_pergunta = r.id_pergunta
-                JOIN datasets d ON d.id_dataset = p.id_dataset
-                JOIN modelos m ON m.id_modelo = r.id_modelo
-                WHERE d.nome_dataset = %s
-                  AND EXISTS (
-                      SELECT 1
-                      FROM required_evaluations required
-                      WHERE NOT EXISTS (
-                          SELECT 1
-                          FROM avaliacoes_juiz a
-                          WHERE a.id_resposta_ativa1 = r.id_resposta
-                            AND a.id_modelo_juiz = required.id_modelo_juiz
-                            AND COALESCE(a.papel_juiz, '') = required.papel_juiz
-                            AND COALESCE(a.motivo_acionamento, '') LIKE required.motivo_pattern
-                            AND COALESCE(a.status_avaliacao, 'success') = 'success'
-                      )
-                  )
-                ORDER BY r.id_resposta
-                LIMIT %s;
+                    id_resposta,
+                    id_pergunta,
+                    nome_dataset,
+                    enunciado,
+                    resposta_ouro,
+                    texto_resposta,
+                    nome_modelo,
+                    metadados
+                FROM selected_answers
+                ORDER BY
+                    id_pergunta,
+                    nome_modelo,
+                    id_resposta;
                 """,
                 params,
             )

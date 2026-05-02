@@ -31,6 +31,7 @@ def test_run_judge_help_exposes_batch_size(capsys: pytest.CaptureFixture[str]) -
     output = capsys.readouterr().out
     assert exit_error.value.code == 0
     assert "--batch-size" in output
+    assert "--preflight-report" in output
 
 
 def test_run_judge_dry_run_prints_single_summary(capsys: pytest.CaptureFixture[str], tmp_path) -> None:

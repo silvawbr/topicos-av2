@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import re
 import shlex
+import hashlib
+import json
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -20,6 +24,7 @@ from .contracts import (
     JudgeSettings,
     ModelSpec,
     PipelineSummary,
+    RemoteJudgeEndpoint,
     RuntimeJudgeConfig,
     StoredJudgeRole,
 )
@@ -39,7 +44,7 @@ class RunJudgeRequest:
     judge_model: str | None = None
     secondary_judge_model: str | None = None
     arbiter_judge_model: str | None = None
-    always_run_arbiter: bool = False
+    always_run_arbiter: bool | None = None
     judge_execution_strategy: str | None = None
     dataset: str = "J2"
     batch_size: int | None = None
@@ -49,6 +54,9 @@ class RunJudgeRequest:
     remote_secondary_judge_api_key: str | None = None
     remote_arbiter_judge_base_url: str | None = None
     remote_arbiter_judge_api_key: str | None = None
+    endpoint_source_judge: str | None = None
+    endpoint_source_secondary: str | None = None
+    endpoint_source_arbiter: str | None = None
     judge_arbitration_min_delta: int | None = None
     remote_judge_timeout_seconds: int | None = None
     remote_judge_temperature: float | None = None
@@ -57,6 +65,7 @@ class RunJudgeRequest:
     remote_judge_openai_compatible: bool | None = None
     judge_save_raw_response: bool | None = None
     dry_run: bool = False
+    preflight_report: bool = False
     audit_log: str | None = None
     no_audit_animation: bool = False
 
@@ -70,6 +79,7 @@ class ResolvedRun:
     audit_path: Path
     execution_summary: str
     command_preview: str
+    preflight_report: str | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +93,7 @@ class RunJudgeResult:
     batch_size: int
     eligibility: EligibilitySummary | None = None
     summary: PipelineSummary | None = None
+    preflight_report: str | None = None
 
 
 class RunJudgeService:
@@ -125,7 +136,7 @@ class RunJudgeService:
             "supported": {
                 "panel_modes": ["single", "primary_only", "2plus1"],
                 "datasets": ["J1", "J2"],
-                "judge_execution_strategies": ["sequential", "parallel"],
+                "judge_execution_strategies": ["sequential", "parallel", "adaptive"],
             },
             "endpoints": _endpoint_overview(settings),
             "presets": [
@@ -209,11 +220,20 @@ class RunJudgeService:
                 audit_path=audit_path,
                 execution_summary=format_execution_summary(runtime_config),
                 command_preview=build_command_preview(request, runtime_config, request.batch_size or settings.judge_batch_size),
+                preflight_report=build_preflight_report(runtime_config, request.batch_size or settings.judge_batch_size)
+                if request.preflight_report
+                else None,
             )
             if on_resolved is not None:
                 on_resolved(resolved)
             audit.file_event("execution_summary", resolved.execution_summary.replace("\n", " | "))
             audit.file_event("command_preview", resolved.command_preview)
+            if request.preflight_report:
+                assert resolved.preflight_report is not None
+                audit.terminal_event(resolved.preflight_report)
+                audit.file_event("preflight_report", resolved.preflight_report.replace("\n", " | "))
+                audit.file_event("preflight_finished", "no database rows selected and no remote judge calls made")
+                return _result(request, resolved, None)
             if request.dry_run:
                 audit.terminal_event("Dry run: no database rows selected and no remote judge calls made.")
                 audit.file_event("dry_run_finished", "no database rows selected and no remote judge calls made")
@@ -371,6 +391,145 @@ def format_execution_summary(config: RuntimeJudgeConfig) -> str:
     return "\n".join(lines)
 
 
+def build_preflight_report(config: RuntimeJudgeConfig, batch_size: int) -> str:
+    """Build a secret-safe adaptive execution plan without DB or judge calls."""
+    lines = [
+        "Preflight report:",
+        f"Mode: {config.panel_mode}",
+        f"Execution strategy: {config.execution_strategy}",
+        f"Batch size: {batch_size}",
+    ]
+    if config.execution_strategy != "adaptive":
+        lines.append("Adaptive scheduler: disabled for this execution strategy.")
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            f"Adaptive initial concurrency: {config.settings.judge_adaptive_initial_concurrency}",
+            f"Adaptive max concurrency: {config.settings.judge_adaptive_max_concurrency}",
+            "Priority order: judge_1 -> judge_2 -> arbiter",
+            "Groups:",
+        ]
+    )
+    groups = _preflight_groups(config)
+    for group in groups.values():
+        lines.append(
+            "- "
+            f"role={group['roles']} provider={config.provider} endpoint={_endpoint_host(group['base_url'])} "
+            f"api_key={group['api_key_fingerprint']} model={group['model_id']} "
+            f"initial={config.settings.judge_adaptive_initial_concurrency} "
+            f"max={config.settings.judge_adaptive_max_concurrency}"
+        )
+
+    snapshots = _fetch_featherless_snapshots(groups.values())
+    if snapshots:
+        lines.append("Provider concurrency snapshots:")
+        lines.extend(f"- {snapshot}" for snapshot in snapshots)
+    else:
+        lines.append("Provider concurrency snapshots: unavailable; fallback is sequential-safe execution.")
+    return "\n".join(lines)
+
+
+def _preflight_groups(config: RuntimeJudgeConfig) -> dict[tuple[str, str, str], dict[str, str]]:
+    groups: dict[tuple[str, str, str], dict[str, str]] = {}
+    for role_label, endpoint_key, model in _preflight_model_slots(config):
+        endpoint = _resolve_endpoint(config, model, endpoint_key)
+        key = (endpoint.base_url, _fingerprint(endpoint.api_key), model.provider_model)
+        group = groups.setdefault(
+            key,
+            {
+                "roles": "",
+                "base_url": endpoint.base_url,
+                "api_key": endpoint.api_key,
+                "api_key_fingerprint": _fingerprint(endpoint.api_key),
+                "model_id": model.provider_model,
+            },
+        )
+        group["roles"] = ",".join(filter(None, [group["roles"], role_label]))
+    return groups
+
+
+def _preflight_model_slots(config: RuntimeJudgeConfig) -> list[tuple[str, str, ModelSpec]]:
+    if config.panel_mode == "single":
+        assert config.single_judge is not None
+        return [("judge_1", "JUDGE", config.single_judge)]
+    slots = [
+        ("judge_1", "JUDGE", config.primary_panel[0]),
+        ("judge_2", "SECONDARY_JUDGE", config.primary_panel[1]),
+    ]
+    if config.panel_mode == "2plus1":
+        assert config.arbiter is not None
+        slots.append(("arbiter", "ARBITER", config.arbiter))
+    return slots
+
+
+def _resolve_endpoint(config: RuntimeJudgeConfig, model: ModelSpec, endpoint_key: str) -> RemoteJudgeEndpoint:
+    normalized_endpoint_key = _endpoint_key(endpoint_key)
+    if normalized_endpoint_key == "JUDGE":
+        return RemoteJudgeEndpoint(
+            base_url=config.settings.remote_judge_base_url or "",
+            api_key=config.settings.remote_judge_api_key or "",
+        )
+    endpoint = config.settings.remote_judge_endpoints.get(normalized_endpoint_key)
+    if endpoint is not None:
+        return endpoint
+    for candidate in (model.requested, model.provider_model):
+        for candidate_key in _endpoint_keys(candidate):
+            endpoint = config.settings.remote_judge_endpoints.get(candidate_key)
+            if endpoint is not None:
+                return endpoint
+    return RemoteJudgeEndpoint(
+        base_url=config.settings.remote_judge_base_url or "",
+        api_key=config.settings.remote_judge_api_key or "",
+    )
+
+
+def _fetch_featherless_snapshots(groups: Any) -> list[str]:
+    snapshots: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for group in groups:
+        base_url = group["base_url"]
+        api_key = group["api_key"]
+        host = _endpoint_host(base_url)
+        if "featherless.ai" not in host or not api_key:
+            continue
+        snapshot_key = (base_url, group["api_key_fingerprint"])
+        if snapshot_key in seen:
+            continue
+        seen.add(snapshot_key)
+        snapshot = _fetch_featherless_snapshot(base_url, api_key)
+        if snapshot is not None:
+            snapshots.append(snapshot)
+    return snapshots
+
+
+def _fetch_featherless_snapshot(base_url: str, api_key: str) -> str | None:
+    parsed = urlparse(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    url = f"{parsed.scheme}://{parsed.netloc}/account/concurrency"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": "atividade-2-judge/0.1",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read(100_000).decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, TimeoutError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return (
+        f"endpoint={_endpoint_host(base_url)} limit={payload.get('limit')} "
+        f"used_cost={payload.get('used_cost')} request_count={payload.get('request_count')}"
+    )
+
+
 def build_command_preview(request: RunJudgeRequest, config: RuntimeJudgeConfig, batch_size: int) -> str:
     """Build the equivalent CLI command without secrets."""
     args = [
@@ -401,6 +560,8 @@ def build_command_preview(request: RunJudgeRequest, config: RuntimeJudgeConfig, 
         args.append("--always-run-arbiter")
     if request.dry_run:
         args.append("--dry-run")
+    if request.preflight_report:
+        args.append("--preflight-report")
     return shlex.join(args)
 
 
@@ -418,6 +579,7 @@ def _result(
         batch_size=resolved.batch_size,
         eligibility=eligibility,
         summary=summary,
+        preflight_report=resolved.preflight_report,
     )
 
 
@@ -462,10 +624,29 @@ def _apply_request_overrides(settings: JudgeSettings, request: RunJudgeRequest) 
             api_key=request.remote_secondary_judge_api_key,
             label="secondary judge",
         )
+    elif request.endpoint_source_secondary == "judge":
+        endpoint_overrides["SECONDARY_JUDGE"] = _complete_endpoint_override(
+            base_url=primary_base_url,
+            api_key=primary_api_key,
+            label="secondary judge",
+        )
     if request.remote_arbiter_judge_base_url or request.remote_arbiter_judge_api_key:
         endpoint_overrides["ARBITER"] = _complete_endpoint_override(
             base_url=request.remote_arbiter_judge_base_url,
             api_key=request.remote_arbiter_judge_api_key,
+            label="arbiter judge",
+        )
+    elif request.endpoint_source_arbiter == "judge":
+        endpoint_overrides["ARBITER"] = _complete_endpoint_override(
+            base_url=primary_base_url,
+            api_key=primary_api_key,
+            label="arbiter judge",
+        )
+    elif request.endpoint_source_arbiter == "secondary":
+        secondary_endpoint = endpoint_overrides.get("SECONDARY_JUDGE")
+        endpoint_overrides["ARBITER"] = _complete_endpoint_override(
+            base_url=secondary_endpoint.base_url if secondary_endpoint else primary_base_url,
+            api_key=secondary_endpoint.api_key if secondary_endpoint else primary_api_key,
             label="arbiter judge",
         )
 
@@ -589,6 +770,12 @@ def _endpoint_host(base_url: str | None) -> str:
         return "<missing>"
     host = urlparse(base_url).hostname
     return host or "<invalid>"
+
+
+def _fingerprint(value: str | None) -> str:
+    if not value:
+        return "<missing>"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
 
 
 def _resolve_audit_path(raw_path: str | None) -> Path:

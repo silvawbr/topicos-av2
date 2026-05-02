@@ -150,6 +150,94 @@ class BlockingRunJudgeService(FakeRunJudgeService):
         )
 
 
+class SkippedEvaluationRunJudgeService(FakeRunJudgeService):
+    def run(
+        self,
+        request,
+        *,
+        progress_callback=None,
+        on_resolved=None,
+        eligibility_callback=None,
+        evaluation_callback=None,
+        should_stop=None,
+    ):
+        self.requests.append(request)
+        eligibility = EligibilitySummary(missing=1, failed=0, successful=240, batch_size=1, will_process=1)
+        if eligibility_callback is not None and not request.dry_run:
+            eligibility_callback(eligibility)
+        if evaluation_callback is not None and not request.dry_run:
+            skipped_event = {
+                "status": "skipped",
+                "dataset": "J2",
+                "question_id": 10,
+                "answer_id": 20,
+                "candidate_model": "modelo-candidato",
+                "judge_model": "openai/gpt-oss-120b",
+                "role": "principal",
+                "panel_mode": "2plus1",
+                "score": 5,
+                "trigger_reason": "2plus1:existing_evaluation",
+            }
+            success_event = {
+                **skipped_event,
+                "status": "success",
+                "judge_model": "meta-llama/Llama-3.3-70B-Instruct",
+                "role": "controle",
+                "trigger_reason": "2plus1:primary_panel",
+                "latency_ms": 123,
+            }
+            evaluation_callback(EvaluationProgress(**skipped_event))
+            evaluation_callback(EvaluationProgress(**success_event))
+        if progress_callback is not None:
+            progress_callback(
+                BatchProgress(
+                    current=1,
+                    total=1,
+                    percent=100,
+                    executed_evaluations=1,
+                    skipped_evaluations=1,
+                    arbiter_evaluations=0,
+                )
+            )
+        return RunJudgeResult(
+            dry_run=request.dry_run,
+            audit_log=self.audit_path,
+            execution_summary="Judge mode: 2plus1",
+            command_preview=".venv/bin/python -m atividade_2.cli run-judge --dataset J2",
+            batch_size=1,
+            eligibility=None if request.dry_run else eligibility,
+            summary=None
+            if request.dry_run
+            else PipelineSummary(
+                selected_answers=1,
+                executed_evaluations=1,
+                skipped_evaluations=1,
+                arbiter_evaluations=0,
+            ),
+        )
+
+
+class NoProgressCallbackRunJudgeService(FakeRunJudgeService):
+    def run(
+        self,
+        request,
+        *,
+        progress_callback=None,
+        on_resolved=None,
+        eligibility_callback=None,
+        evaluation_callback=None,
+        should_stop=None,
+    ):
+        return super().run(
+            request,
+            progress_callback=None,
+            on_resolved=on_resolved,
+            eligibility_callback=eligibility_callback,
+            evaluation_callback=evaluation_callback,
+            should_stop=should_stop,
+        )
+
+
 class FakeDashboardService:
     def __init__(self) -> None:
         self.filters: list[DashboardFilters] = []
@@ -319,6 +407,7 @@ def test_web_index_contains_progress_element() -> None:
     response = client.get("/")
 
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
     assert 'data-tab="dashboard-panel">Dashboard</button>' in response.text
     assert '<main id="dashboard-panel" class="dashboard-layout tab-panel">' in response.text
     assert '<main id="execution-panel" class="tab-panel" hidden>' in response.text
@@ -336,6 +425,7 @@ def test_web_index_contains_progress_element() -> None:
     assert "Dump completo em outputs/backup." not in response.text
     assert "confirm(" not in response.text
     assert '<progress id="batch-progress"' in response.text
+    assert 'setText("selected", summary?.selected_answers ?? eligibility?.will_process ?? data.progress?.total);' in response.text
     assert 'id="eligible-missing"' in response.text
     assert 'id="execution-table-body"' in response.text
     assert "/api/runs/" in response.text
@@ -383,6 +473,18 @@ def test_web_index_contains_progress_element() -> None:
     assert "function renderCriticalErrorAnalysis" in response.text
     assert "function moveCarousel" in response.text
     assert "function goToCarouselPage" in response.text
+    assert "function scrollCarouselTabsIntoView" in response.text
+    assert ".carousel-tabs { flex:1 1 auto;" in response.text
+    assert ".carousel-controls { flex:0 0 auto;" in response.text
+    assert "if (index <= 1)" in response.text
+    assert "Math.max(0, index - 1)" in response.text
+    assert "Math.min(tabs.length - 1, index + 1)" in response.text
+    assert "const maxScrollLeft = Math.max(0, root.scrollWidth - root.clientWidth)" in response.text
+    assert "scroll-padding-left:8px" in response.text
+    assert 'activeTab.scrollIntoView({behavior: "smooth", block: "nearest", inline: "start"})' in response.text
+    assert "Math.min(maxScrollLeft, Math.max(0, desiredLeft))" in response.text
+    assert "function resetCarouselTabsScroll" in response.text
+    assert "requestAnimationFrame(resetCarouselTabsScroll)" in response.text
     assert "(dashboardCarouselIndex + delta + cards.length) % cards.length" in response.text
     assert "track.style.transform" in response.text
     assert "score_distribution_by_model" in response.text
@@ -394,11 +496,38 @@ def test_web_index_contains_progress_element() -> None:
     assert "critical_error_analysis" in response.text
     assert "function buildPostRunStats" in response.text
     assert "function renderPostRunPanel" in response.text
+    assert 'fetch(`/api/runs/${runId}`, {cache: "no-store"})' in response.text
+    assert "event.error ? friendlyErrorMessage(event.error) : null" in response.text
     assert "showPercent: true" in response.text
     assert 'className = "bar-percent"' in response.text
     assert 'className = `bar-count ${valueTone(value, row, options)}`' in response.text
     assert "function applyBarTone" in response.text
     assert "function valueTone" in response.text
+
+
+def test_dashboard_tab_selection_always_refreshes_dashboard_data() -> None:
+    client = TestClient(create_app(FakeRunJudgeService()))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'if (targetId === "dashboard-panel") loadDashboard();' in response.text
+    assert 'if (targetId === "dashboard-panel" && !dashboardLoaded) loadDashboard();' not in response.text
+
+
+def test_tab_navigation_does_not_cancel_active_run_or_stop_polling() -> None:
+    client = TestClient(create_app(FakeRunJudgeService()))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    switch_tab_source = response.text.split("function switchTab(targetId) {", maxsplit=1)[1].split(
+        "async function loadConfig()",
+        maxsplit=1,
+    )[0]
+    assert "/cancel" not in switch_tab_source
+    assert "clearInterval(pollTimer)" not in switch_tab_source
+    assert "activeRunId = null" not in switch_tab_source
 
 
 def test_web_index_contains_endpoint_and_advanced_controls() -> None:
@@ -415,6 +544,9 @@ def test_web_index_contains_endpoint_and_advanced_controls() -> None:
     assert 'id="endpoint_source_judge"' in response.text
     assert 'id="endpoint_source_secondary"' in response.text
     assert 'id="endpoint_source_arbiter"' in response.text
+    assert 'remote_secondary_judge_base_url: secondaryEndpointSource === "custom"' in response.text
+    assert 'remote_arbiter_judge_api_key: arbiterEndpointSource === "custom"' in response.text
+    assert "function applyEndpointSources" not in response.text
     assert 'id="endpoint_fields_judge" class="endpoint-fields" hidden' in response.text
     assert 'id="endpoint_fields_secondary" class="endpoint-fields" hidden' in response.text
     assert 'id="endpoint_fields_arbiter" class="endpoint-fields" hidden' in response.text
@@ -422,6 +554,8 @@ def test_web_index_contains_endpoint_and_advanced_controls() -> None:
     assert 'id="remote_judge_openai_compatible"' in response.text
     assert "<summary>Campos avancados</summary>" in response.text
     assert 'id="always_run_arbiter"' in response.text
+    assert response.text.index('id="always_run_arbiter"') < response.text.index("<details>")
+    assert response.text.index('id="judge_save_raw_response"') > response.text.index("<details>")
     assert 'id="dry-run" disabled' in response.text
     assert 'id="run" disabled' in response.text
     assert 'id="stop-run" type="button" disabled' in response.text
@@ -550,6 +684,33 @@ def test_mutating_endpoint_requires_csrf_token() -> None:
     assert response.status_code == 403
 
 
+def test_config_exposes_unique_judge_model_options() -> None:
+    client = TestClient(create_app(FakeRunJudgeService()))
+
+    response = client.get("/api/config")
+
+    assert response.status_code == 200
+    assert response.json()["judge_model_options"] == [
+        "gpt-oss-120b",
+        "llama-3.3-70b-instruct",
+        "m-prometheus-14b",
+    ]
+
+
+def test_execution_form_uses_model_selects_and_mode_blocks() -> None:
+    client = TestClient(create_app(FakeRunJudgeService()))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert '<select id="judge_model"></select>' in response.text
+    assert '<select id="secondary_judge_model"></select>' in response.text
+    assert '<select id="arbiter_judge_model"></select>' in response.text
+    assert 'id="secondary_block" class="judge-block" data-judge-block="secondary"' in response.text
+    assert 'id="arbiter_block" class="judge-block" data-judge-block="arbiter"' in response.text
+    assert "function renderJudgeBlocks()" in response.text
+
+
 def test_dry_run_returns_secret_safe_preview() -> None:
     client = TestClient(create_app(FakeRunJudgeService()))
     token = client.get("/api/config").json()["csrf_token"]
@@ -586,6 +747,8 @@ def test_dry_run_accepts_endpoint_and_advanced_overrides() -> None:
             "remote_secondary_judge_api_key": "key-2",
             "remote_arbiter_judge_base_url": "https://arbiter.example.invalid/v1",
             "remote_arbiter_judge_api_key": "key-3",
+            "endpoint_source_secondary": "custom",
+            "endpoint_source_arbiter": "custom",
             "judge_arbitration_min_delta": 1,
             "remote_judge_timeout_seconds": 240,
             "remote_judge_temperature": 0.0,
@@ -601,9 +764,45 @@ def test_dry_run_accepts_endpoint_and_advanced_overrides() -> None:
     assert request.remote_judge_base_url == "https://judge1.example.invalid/v1"
     assert request.remote_secondary_judge_api_key == "key-2"
     assert request.remote_arbiter_judge_base_url == "https://arbiter.example.invalid/v1"
+    assert request.endpoint_source_secondary == "custom"
+    assert request.endpoint_source_arbiter == "custom"
     assert request.judge_arbitration_min_delta == 1
     assert request.remote_judge_timeout_seconds == 240
     assert request.judge_save_raw_response is False
+
+
+def test_dry_run_accepts_endpoint_copy_sources_without_target_secrets() -> None:
+    service = FakeRunJudgeService()
+    client = TestClient(create_app(service))
+    token = client.get("/api/config").json()["csrf_token"]
+
+    response = client.post(
+        "/api/runs/dry-run",
+        headers={"x-csrf-token": token},
+        json={
+            "panel_mode": "2plus1",
+            "dataset": "J2",
+            "batch_size": 1,
+            "remote_judge_base_url": "https://judge1.example.invalid/v1",
+            "remote_judge_api_key": "key-1",
+            "remote_secondary_judge_base_url": "",
+            "remote_secondary_judge_api_key": "",
+            "remote_arbiter_judge_base_url": "",
+            "remote_arbiter_judge_api_key": "",
+            "endpoint_source_judge": "custom",
+            "endpoint_source_secondary": "judge",
+            "endpoint_source_arbiter": "secondary",
+        },
+    )
+
+    assert response.status_code == 200
+    request = service.requests[-1]
+    assert request.remote_judge_base_url == "https://judge1.example.invalid/v1"
+    assert request.remote_secondary_judge_base_url is None
+    assert request.remote_arbiter_judge_api_key is None
+    assert request.endpoint_source_judge == "custom"
+    assert request.endpoint_source_secondary == "judge"
+    assert request.endpoint_source_arbiter == "secondary"
 
 
 def test_run_lifecycle_exposes_batch_progress() -> None:
@@ -636,6 +835,49 @@ def test_run_lifecycle_exposes_batch_progress() -> None:
     assert data["started_at"] is not None
     assert data["finished_at"] is not None
     assert data["duration"] is not None
+
+
+def test_run_lifecycle_hides_skipped_evaluations_from_execution_table_payload() -> None:
+    client = TestClient(create_app(SkippedEvaluationRunJudgeService()))
+    token = client.get("/api/config").json()["csrf_token"]
+
+    created = client.post(
+        "/api/runs",
+        headers={"x-csrf-token": token},
+        json={"panel_mode": "2plus1", "dataset": "J2", "batch_size": 1},
+    )
+
+    assert created.status_code == 200
+    data = client.get(f"/api/runs/{created.json()['run_id']}").json()
+    assert data["progress"]["skipped_evaluations"] == 1
+    assert [event["status"] for event in data["evaluation_events"]] == ["success"]
+    assert data["evaluation_events"][0]["role"] == "controle"
+
+
+def test_completed_run_progress_falls_back_to_summary_when_callback_is_missing() -> None:
+    client = TestClient(create_app(NoProgressCallbackRunJudgeService()))
+    token = client.get("/api/config").json()["csrf_token"]
+
+    created = client.post(
+        "/api/runs",
+        headers={"x-csrf-token": token},
+        json={"panel_mode": "single", "dataset": "J2", "batch_size": 1},
+    )
+
+    assert created.status_code == 200
+    run_id = created.json()["run_id"]
+    current = client.get(f"/api/runs/{run_id}")
+
+    assert current.status_code == 200
+    data = current.json()
+    assert data["progress"] == {
+        "current": 1,
+        "total": 1,
+        "percent": 100,
+        "executed_evaluations": 1,
+        "skipped_evaluations": 0,
+        "arbiter_evaluations": 0,
+    }
 
 
 def test_run_exposes_audit_log_link_and_file_content(tmp_path) -> None:
@@ -684,9 +926,11 @@ def test_index_translates_common_runtime_errors() -> None:
     assert "Configure a URL do endpoint do juiz" in response.text
     assert "Configure a key local; não commitar" in response.text
     assert "O modelo não respeitou o contrato de saída" in response.text
+    assert "Modelo sem acesso neste provedor" in response.text
     assert "Modelo inválido ou sem acesso nesse provedor" in response.text
     assert "aumentar timeout ou reduzir batch" in response.text
     assert "key inválida ou sem permissão" in response.text
+    assert "acesso negado pelo provedor" in response.text
     assert "base URL/modelo incorreto" in response.text
 
 

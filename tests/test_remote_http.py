@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import io
+import urllib.error
 from typing import Any
 
 import pytest
 
 from atividade_2.config import load_settings
-from atividade_2.judge_clients.remote_http import RemoteHttpJudgeClient, RemoteJudgeError
+from atividade_2.judge_clients.remote_http import RemoteHttpJudgeClient, RemoteJudgeError, UrllibHttpTransport
 
 
 class FakeTransport:
@@ -213,8 +215,85 @@ def test_remote_client_handles_non_2xx() -> None:
     )
     client = RemoteHttpJudgeClient(settings, transport=FakeTransport(500, {"error": "down"}))
 
-    with pytest.raises(RemoteJudgeError, match="HTTP 500"):
+    with pytest.raises(RemoteJudgeError, match="HTTP 500") as error:
         client.judge("prompt", "provider/model")
+    assert error.value.status_code == 500
+    assert error.value.retryable is True
+
+
+def test_remote_client_classifies_auth_and_missing_model_errors_as_non_retryable() -> None:
+    settings = load_settings(
+        dotenv_path=None,
+        env={
+            "REMOTE_JUDGE_BASE_URL": "https://example.invalid/v1",
+            "REMOTE_JUDGE_API_KEY": "secret",
+        },
+    )
+    client = RemoteHttpJudgeClient(settings, transport=FakeTransport(403, {"error": "forbidden"}))
+
+    with pytest.raises(RemoteJudgeError, match="HTTP 403") as error:
+        client.judge("prompt", "provider/model")
+    assert error.value.status_code == 403
+    assert error.value.retryable is False
+
+
+def test_urllib_transport_preserves_retry_after_for_429(monkeypatch: pytest.MonkeyPatch) -> None:
+    http_error = urllib.error.HTTPError(
+        "https://example.invalid/v1/chat/completions",
+        429,
+        "Too Many Requests",
+        {"Retry-After": "7"},
+        io.BytesIO(b'{"error":"rate limited"}'),
+    )
+
+    def raise_http_error(*args: Any, **kwargs: Any) -> None:
+        raise http_error
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_http_error)
+
+    with pytest.raises(RemoteJudgeError, match="HTTP 429") as error:
+        UrllibHttpTransport().post(
+            "https://example.invalid/v1/chat/completions",
+            headers={},
+            payload={"model": "provider/model"},
+            timeout=1,
+        )
+    assert error.value.status_code == 429
+    assert error.value.retry_after_seconds == 7
+    assert error.value.retryable is True
+
+
+def test_urllib_transport_classifies_daily_token_quota_429_as_non_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = (
+        b'{"error":{"message":"Rate limit reached for model `llama-3.3-70b-versatile` '
+        b'in organization `org_123` service tier `on_demand` on tokens per day (TPD): '
+        b'Limit 100000, Used 99787, Requested 1094. Please try again in 12m41.184s."}}'
+    )
+    http_error = urllib.error.HTTPError(
+        "https://example.invalid/v1/chat/completions",
+        429,
+        "Too Many Requests",
+        {"Retry-After": "761"},
+        io.BytesIO(body),
+    )
+
+    def raise_http_error(*args: Any, **kwargs: Any) -> None:
+        raise http_error
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_http_error)
+
+    with pytest.raises(RemoteJudgeError, match="HTTP 429") as error:
+        UrllibHttpTransport().post(
+            "https://example.invalid/v1/chat/completions",
+            headers={},
+            payload={"model": "llama-3.3-70b-versatile"},
+            timeout=1,
+        )
+    assert error.value.status_code == 429
+    assert error.value.retry_after_seconds == 761
+    assert error.value.retryable is False
 
 
 def test_remote_client_requires_text_in_response() -> None:

@@ -230,8 +230,14 @@ O modo `single` usa `REMOTE_JUDGE_MODEL`, o mesmo modelo do juiz 1. Se só a URL
 | `REMOTE_ARBITER_JUDGE_MODEL` | `m-prometheus-14b` | Juiz árbitro. |
 | `JUDGE_ARBITRATION_MIN_DELTA` | `2` | Para arbitragem mais ou menos sensível. |
 | `JUDGE_ALWAYS_RUN_ARBITER` | `false` | Use `true` só para auditoria/amostra. |
-| `JUDGE_EXECUTION_STRATEGY` | `sequential` | Use `parallel` quando o endpoint aceitar concorrência. |
+| `JUDGE_EXECUTION_STRATEGY` | `sequential` | Use `parallel` para concorrência fixa ou `adaptive` para ajuste por endpoint/modelo. |
 | `JUDGE_BATCH_SIZE` | `10` | Quantas respostas pendentes buscar por execução incremental. |
+| `JUDGE_ADAPTIVE_INITIAL_CONCURRENCY` | `2` | Concorrência inicial por grupo no modo `adaptive`. |
+| `JUDGE_ADAPTIVE_MAX_CONCURRENCY` | `4` | Teto local de concorrência por grupo no modo `adaptive`. |
+| `JUDGE_ADAPTIVE_SUCCESS_THRESHOLD` | `5` | Sucessos consecutivos antes de aumentar concorrência em `+1`. |
+| `JUDGE_ADAPTIVE_MAX_RETRIES` | `3` | Retentativas para `429`, `5xx` e timeouts. |
+| `JUDGE_ADAPTIVE_BASE_BACKOFF_SECONDS` | `2` | Backoff inicial quando não houver `Retry-After`. |
+| `JUDGE_ADAPTIVE_MAX_BACKOFF_SECONDS` | `60` | Backoff máximo por tentativa. |
 | `REMOTE_JUDGE_TIMEOUT_SECONDS` | `180` | Para modelos lentos. |
 | `REMOTE_JUDGE_TEMPERATURE` | `0.0` | Mantenha assim para avaliação mais determinística. |
 | `REMOTE_JUDGE_MAX_TOKENS` | `4000` | Reduza só se o endpoint tiver limite baixo; Gemini truncou JSON com valores menores nos testes. |
@@ -273,12 +279,23 @@ Também é possível passar diretamente um provider model id. Valores sem alias 
 Controle chamadas de API em `.env`:
 
 ```env
-JUDGE_EXECUTION_STRATEGY=sequential
+JUDGE_EXECUTION_STRATEGY=adaptive
 ```
 
-Use `sequential` para modelo local, pouca VRAM ou endpoint frágil. Use `parallel` para endpoint remoto que aceita concorrência.
+Use `sequential` para modelo local, pouca VRAM ou endpoint frágil. Use `parallel` para endpoint remoto que aceita concorrência fixa. Use `adaptive` para deixar o executor ajustar concorrência por endpoint/modelo, reduzindo em `429` e refileirando com backoff.
 
 No modo `2plus1`, só os dois primários podem rodar em paralelo. O árbitro sempre roda depois, porque depende da diferença entre as notas.
+
+No modo `adaptive`, a prioridade é `juiz 1 -> juiz 2 -> árbitro`. O árbitro continua sendo agendado apenas depois das notas primárias e da regra de arbitragem. Para ver o plano inicial sem selecionar respostas nem avaliar modelos:
+
+```bash
+.venv/bin/python -m atividade_2.cli run-judge \
+  --panel-mode 2plus1 \
+  --dataset J2 \
+  --batch-size 10 \
+  --judge-execution-strategy adaptive \
+  --preflight-report
+```
 
 Override por execução:
 
