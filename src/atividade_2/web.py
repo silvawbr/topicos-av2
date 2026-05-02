@@ -22,6 +22,7 @@ from .config import ConfigurationError
 from .contracts import BatchProgress, EligibilitySummary, EvaluationProgress, PipelineSummary
 from .dashboard import DashboardService, parse_dashboard_filters
 from .database_dump import DatabaseDumpService, DatabaseResetService, resolve_dump_path
+from .judge_prompt_configs import JudgePromptConfigService
 from .judge_clients.remote_http import RemoteJudgeError
 from .parser import JudgeParseError
 from .run_judge_service import RunJudgeRequest, RunJudgeResult, RunJudgeService
@@ -90,6 +91,16 @@ class RunPayload(BaseModel):
             dry_run=dry_run,
             no_audit_animation=True,
         )
+
+
+class PromptConfigPayload(BaseModel):
+    dataset: str
+    prompt: str
+    persona: str
+    context: str
+    rubric: str
+    output: str
+    changed_by: str
 
 
 @dataclass
@@ -235,6 +246,7 @@ def create_app(
     dashboard_service: DashboardService | None = None,
     dump_service: DatabaseDumpService | None = None,
     database_reset_service: DatabaseResetService | None = None,
+    judge_prompt_service: JudgePromptConfigService | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Atividade 2 Judge Console")
     app.state.csrf_token = secrets.token_urlsafe(32)
@@ -244,6 +256,7 @@ def create_app(
     app.state.dashboard = dashboard_service or DashboardService()
     app.state.dump_service = dump_service or DatabaseDumpService(output_dir=backup_dir)
     app.state.database_reset_service = database_reset_service or DatabaseResetService()
+    app.state.judge_prompt_service = judge_prompt_service or JudgePromptConfigService()
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
@@ -281,6 +294,35 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(error)) from error
         except RuntimeError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @app.get("/api/judge-prompts/options")
+    def get_judge_prompt_options(request: Request) -> dict:
+        try:
+            return request.app.state.judge_prompt_service.options()
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @app.get("/api/judge-prompts")
+    def get_judge_prompt_config(dataset: str, request: Request) -> dict:
+        try:
+            return request.app.state.judge_prompt_service.get(dataset=dataset)
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.put("/api/judge-prompts", dependencies=[Depends(_require_csrf)])
+    def save_judge_prompt_config(payload: PromptConfigPayload, request: Request) -> dict:
+        try:
+            return request.app.state.judge_prompt_service.save(
+                dataset=payload.dataset,
+                prompt=payload.prompt,
+                persona=payload.persona,
+                context=payload.context,
+                rubric=payload.rubric,
+                output=payload.output,
+                changed_by=payload.changed_by,
+            )
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.post("/api/runs/dry-run", dependencies=[Depends(_require_csrf)])
     def dry_run(payload: RunPayload, request: Request) -> dict:
@@ -699,7 +741,8 @@ _INDEX_HTML = """
     aside { padding-bottom:82px; }
     h2 { font-size:15px; margin:0 0 12px; }
     label { display:grid; gap:5px; margin:10px 0; color:var(--muted); font-size:12px; }
-    input, select { width:100%; min-height:36px; border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; color:var(--ink); background:#fff; }
+    input, select, textarea { width:100%; min-height:36px; border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; color:var(--ink); background:#fff; }
+    textarea { min-height:112px; resize:vertical; }
     button { border:1px solid var(--accent); background:var(--accent); color:#fff; border-radius:6px; min-height:36px; padding:0 12px; font-weight:650; cursor:pointer; }
     .button-link { display:inline-flex; align-items:center; min-height:32px; padding:0 10px; border:1px solid var(--accent); border-radius:6px; color:var(--accent); background:#fff; font-size:12px; font-weight:650; text-decoration:none; }
     button.secondary { color:var(--accent); background:#fff; }
@@ -755,6 +798,13 @@ _INDEX_HTML = """
     .database-actions-menu button:hover { background:#f2f8fd; color:var(--accent); }
     .database-actions-menu button.danger { color:var(--bad); }
     .database-actions-menu button.danger:hover { background:#fff5f5; }
+    .prompt-layout { width:min(100%, 1440px); margin:0 auto; padding:20px; display:grid; grid-template-columns:minmax(320px,420px) minmax(0,1fr); gap:18px; }
+    .prompt-status { margin-top:10px; }
+    .prompt-log-table table { min-width:1480px; }
+    .prompt-preview { margin-top:18px; display:grid; gap:10px; }
+    .prompt-preview-card { border:1px solid var(--line); border-radius:8px; background:#fff; padding:12px; }
+    .prompt-preview-card h3 { margin:0 0 8px; font-size:13px; }
+    .prompt-preview-card pre { margin:0; white-space:pre-wrap; word-break:break-word; max-height:320px; overflow:auto; }
     .dashboard-filters select[multiple] { min-height:92px; }
     .dashboard-filter-actions { display:flex; gap:8px; margin-top:12px; }
     .dashboard-filter-actions button { flex:1; }
@@ -869,6 +919,7 @@ _INDEX_HTML = """
     <button class="tab-button active" type="button" data-tab="dashboard-panel">Dashboard</button>
     <button class="tab-button" type="button" data-tab="execution-panel">Execucao</button>
     <button class="tab-button" type="button" data-tab="history-panel">Execucoes anteriores</button>
+    <button class="tab-button" type="button" data-tab="prompt-panel">Prompt Juizes</button>
   </nav>
   <main id="dashboard-panel" class="dashboard-layout tab-panel">
     <aside class="dashboard-filters">
@@ -1260,6 +1311,68 @@ _INDEX_HTML = """
       <pre id="history-log-content" class="history-log">Selecione uma execucao.</pre>
     </aside>
   </div>
+    <div id="prompt-panel" class="prompt-layout tab-panel" hidden>
+      <aside>
+        <h2>Configuracao do prompt</h2>
+        <label>Dataset
+          <select id="prompt_dataset"></select>
+        </label>
+        <label>Prompt
+          <textarea id="prompt_body" placeholder="[PERSONA]\n\n[CONTEXTO]\n\n[RUBRICA]\n\n[SAIDA]"></textarea>
+        </label>
+        <label>Persona
+          <textarea id="prompt_persona" placeholder="Descreva a persona do juiz"></textarea>
+        </label>
+        <label>Contexto
+          <textarea id="prompt_context" placeholder="Pergunta: {pergunta_oab}\nGabarito: {resposta_ouro}\nResposta: {resposta_modelo_edge}"></textarea>
+        </label>
+        <label>Rubrica
+          <textarea id="prompt_rubric" placeholder="Defina a rubrica de avaliacao"></textarea>
+        </label>
+        <label>Saida
+          <textarea id="prompt_output" placeholder="json com o seguinte formato"></textarea>
+        </label>
+        <label>Alterado por
+          <input id="prompt_changed_by" autocomplete="off" placeholder="Nome do responsavel pela alteracao">
+        </label>
+        <div class="actions">
+          <button class="secondary" id="prompt_reload" type="button">Recarregar</button>
+          <button id="prompt_save" type="button">Salvar</button>
+        </div>
+        <div id="prompt_status" class="status prompt-status">Selecione um dataset para carregar.</div>
+      </aside>
+      <section>
+        <div class="prompt-preview">
+          <div class="prompt-preview-card">
+            <h3>Preview com questao de exemplo</h3>
+            <div class="muted" id="prompt_preview_meta">Nenhum preview carregado.</div>
+            <pre id="prompt_preview_content">Selecione um dataset para montar o prompt.</pre>
+          </div>
+        </div>
+        <div style="height:16px"></div>
+        <h2>Versoes do prompt</h2>
+        <div class="table-wrap prompt-log-table">
+          <table aria-label="Versoes de prompt de juizes">
+            <thead>
+              <tr>
+                <th>versao</th>
+                <th>status</th>
+                <th>quando</th>
+                <th>quem</th>
+                <th>prompt</th>
+                <th>persona</th>
+                <th>contexto</th>
+                <th>rubrica</th>
+                <th>saida</th>
+              </tr>
+            </thead>
+            <tbody id="prompt_logs_body">
+              <tr><td colspan="9" class="muted">Nenhuma configuracao carregada.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
   <dialog id="details-dialog">
     <div class="dialog-head">
       <strong id="details-title">Detalhes da avaliacao</strong>
@@ -1317,6 +1430,7 @@ _INDEX_HTML = """
     let csrfToken = "";
     let pollTimer = null;
     let historyLoaded = false;
+    let promptOptionsLoaded = false;
     let dashboardLoaded = false;
     let currentAuditLogUrl = null;
     let activeRunId = null;
@@ -2418,6 +2532,102 @@ _INDEX_HTML = """
       historyLoaded = true;
     }
 
+    async function loadPromptOptions() {
+      const response = await fetch("/api/judge-prompts/options");
+      const data = await response.json();
+      populateSelect("prompt_dataset", data.datasets || [], "value", "label");
+      promptOptionsLoaded = true;
+      if (value("prompt_dataset")) await loadPromptConfig();
+    }
+
+    async function loadPromptConfig() {
+      const dataset = value("prompt_dataset");
+      if (!dataset) return;
+      setText("prompt_status", "Carregando configuracao...");
+      try {
+        const response = await fetch(`/api/judge-prompts?dataset=${encodeURIComponent(dataset)}`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Falha ao carregar prompt.");
+        const record = data.record;
+        document.getElementById("prompt_body").value = record?.prompt || "";
+        document.getElementById("prompt_persona").value = record?.persona || "";
+        document.getElementById("prompt_context").value = record?.context || "";
+        document.getElementById("prompt_rubric").value = record?.rubric || "";
+        document.getElementById("prompt_output").value = record?.output || "";
+        renderPromptLogs(data.versions || []);
+        renderPromptPreview(data.preview);
+        setText("prompt_status", record ? `Versao ativa v${display(record.version)} carregada. Criada em: ${formatDateTime(record.created_at)}` : "Nenhuma configuracao salva para esse dataset.");
+      } catch (error) {
+        setText("prompt_status", friendlyErrorMessage(error.message));
+      }
+    }
+
+    async function savePromptConfig() {
+      const changedBy = value("prompt_changed_by").trim();
+      if (!changedBy) {
+        setText("prompt_status", "Informe quem esta alterando o prompt.");
+        return;
+      }
+      try {
+        const data = await putJson("/api/judge-prompts", {
+          dataset: value("prompt_dataset"),
+          prompt: value("prompt_body"),
+          persona: value("prompt_persona"),
+          context: value("prompt_context"),
+          rubric: value("prompt_rubric"),
+          output: value("prompt_output"),
+          changed_by: changedBy
+        });
+        renderPromptLogs(data.versions || []);
+        renderPromptPreview(data.preview);
+        setText("prompt_status", `Nova versao salva: v${display(data.record?.version)} em ${formatDateTime(data.record?.created_at)}.`);
+      } catch (error) {
+        setText("prompt_status", friendlyErrorMessage(error.message));
+      }
+    }
+
+    function renderPromptLogs(rows) {
+      const body = document.getElementById("prompt_logs_body");
+      body.textContent = "";
+        if (!rows.length) {
+          const row = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.colSpan = 9;
+          cell.className = "muted";
+          cell.textContent = "Nenhuma versao registrada.";
+          row.appendChild(cell);
+        body.appendChild(row);
+        return;
+      }
+        rows.forEach((entry) => {
+          const row = document.createElement("tr");
+          for (const field of [
+            `v${display(entry.version)}`,
+            entry.active ? "ativa" : "historica",
+            formatDateTime(entry.created_at),
+            entry.created_by,
+            `${entry.prompt_chars || 0} chars`,
+            `${entry.persona_chars || 0} chars`,
+            `${entry.context_chars || 0} chars`,
+            `${entry.rubric_chars || 0} chars`,
+            `${entry.output_chars || 0} chars`
+          ]) appendCell(row, display(field));
+          body.appendChild(row);
+        });
+      }
+
+    function renderPromptPreview(preview) {
+      if (!preview) {
+        setText("prompt_preview_meta", "Nenhum preview disponivel.");
+        setText("prompt_preview_content", "Nao foi possivel montar o prompt de exemplo.");
+        return;
+      }
+      const versionLabel = preview.version ? ` | versao v${display(preview.version)}` : "";
+      const meta = `Dataset ${display(preview.dataset)} | questao ${display(preview.question_id)} | resposta ${display(preview.answer_id)} | modelo ${display(preview.candidate_model)}${versionLabel}`;
+      setText("prompt_preview_meta", meta);
+      setText("prompt_preview_content", preview.rendered_prompt || "Salve a configuracao para visualizar o prompt montado.");
+    }
+
     function renderHistory(rows) {
       const body = document.getElementById("history-table-body");
       body.textContent = "";
@@ -2502,6 +2712,7 @@ _INDEX_HTML = """
       }
       if (targetId === "dashboard-panel") loadDashboard();
       if (targetId === "history-panel" && !historyLoaded) loadHistory();
+      if (targetId === "prompt-panel" && !promptOptionsLoaded) loadPromptOptions();
     }
 
     async function loadConfig() {
@@ -2548,6 +2759,32 @@ _INDEX_HTML = """
       document.getElementById("dry-run").disabled = false;
       document.getElementById("run").disabled = false;
       await loadDashboard();
+    }
+
+    function populateSelect(id, options, valueKey, labelKey) {
+      const select = document.getElementById(id);
+      const current = select.value;
+      select.textContent = "";
+      for (const optionData of options) {
+        const option = document.createElement("option");
+        option.value = optionData[valueKey];
+        option.textContent = optionData[labelKey];
+        select.appendChild(option);
+      }
+      if (current && Array.from(select.options).some((option) => option.value === current)) {
+        select.value = current;
+      }
+    }
+
+    async function putJson(url, body) {
+      const response = await fetch(url, {
+        method: "PUT",
+        headers: {"content-type": "application/json", "x-csrf-token": csrfToken},
+        body: JSON.stringify(body)
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Request failed");
+      return data;
     }
 
     function renderEndpointFields() {
@@ -2616,6 +2853,9 @@ _INDEX_HTML = """
     for (const button of document.querySelectorAll(".tab-button")) {
       button.onclick = () => switchTab(button.dataset.tab);
     }
+    document.getElementById("prompt_dataset").onchange = () => loadPromptConfig();
+    document.getElementById("prompt_reload").onclick = () => loadPromptConfig();
+    document.getElementById("prompt_save").onclick = () => savePromptConfig();
     document.getElementById("dashboard-refresh").onclick = loadDashboard;
     document.getElementById("dashboard-model-carousel-prev").onclick = () => moveCarousel(-1);
     document.getElementById("dashboard-model-carousel-next").onclick = () => moveCarousel(1);

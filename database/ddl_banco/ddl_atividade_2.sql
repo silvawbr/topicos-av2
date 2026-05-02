@@ -1,12 +1,12 @@
 -- ============================================================
--- Atividade 2 - Modelagem PostgreSQL
--- Domínio: Jurídico
--- Objetivo: armazenar datasets, respostas da Atividade 1
--- e avaliações LLM-as-a-Judge com rastreabilidade.
+-- Atividade 2 - PostgreSQL schema
+-- Domain: juridical
+-- Objective: store datasets, AV1 answers, prompt versions,
+-- and LLM-as-a-Judge evaluations with traceability.
 -- ============================================================
 
 -- =========================
--- 1. Tabela de Modelos
+-- 1. Models
 -- =========================
 CREATE TABLE modelos (
     id_modelo SERIAL PRIMARY KEY,
@@ -18,7 +18,7 @@ CREATE TABLE modelos (
 );
 
 -- =========================
--- 2. Tabela de Datasets
+-- 2. Datasets
 -- =========================
 CREATE TABLE datasets (
     id_dataset SERIAL PRIMARY KEY,
@@ -27,7 +27,7 @@ CREATE TABLE datasets (
 );
 
 -- =========================
--- 3. Tabela de Perguntas
+-- 3. Questions
 -- =========================
 CREATE TABLE perguntas (
     id_pergunta SERIAL PRIMARY KEY,
@@ -41,7 +41,7 @@ CREATE TABLE perguntas (
 );
 
 -- =========================
--- 4. Respostas da Atividade 1
+-- 4. AV1 answers
 -- =========================
 CREATE TABLE respostas_atividade_1 (
     id_resposta SERIAL PRIMARY KEY,
@@ -61,7 +61,30 @@ CREATE TABLE respostas_atividade_1 (
 );
 
 -- =========================
--- 5. Avaliações do Juiz
+-- 5. Judge prompt versions
+-- =========================
+CREATE TABLE prompt_juizes (
+    id_prompt_juiz SERIAL PRIMARY KEY,
+
+    id_dataset INTEGER NOT NULL
+        REFERENCES datasets(id_dataset),
+
+    versao INTEGER NOT NULL,
+    ds_prompt TEXT NOT NULL,
+    ds_persona TEXT NOT NULL,
+    ds_contexto TEXT NOT NULL,
+    ds_rubrica TEXT NOT NULL,
+    ds_saida TEXT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by VARCHAR(120) NOT NULL DEFAULT 'system',
+    ativo BOOLEAN NOT NULL DEFAULT FALSE,
+
+    UNIQUE (id_dataset, versao)
+);
+
+-- =========================
+-- 6. Judge evaluations
 -- =========================
 CREATE TABLE avaliacoes_juiz (
     id_avaliacao SERIAL PRIMARY KEY,
@@ -72,37 +95,46 @@ CREATE TABLE avaliacoes_juiz (
     id_modelo_juiz INTEGER NOT NULL
         REFERENCES modelos(id_modelo),
 
+    id_prompt_juiz INTEGER NOT NULL
+        REFERENCES prompt_juizes(id_prompt_juiz),
+
     nota_atribuida INTEGER NOT NULL
         CHECK (nota_atribuida BETWEEN 1 AND 5),
 
-    prompt_juiz TEXT NOT NULL,
-    rubrica_utilizada TEXT NOT NULL,
     chain_of_thought TEXT NOT NULL,
+    papel_juiz VARCHAR(20),
+    rodada_julgamento VARCHAR(30),
+    motivo_acionamento TEXT,
     status_avaliacao VARCHAR(20) DEFAULT 'success',
 
     data_avaliacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- =========================
--- Indices
+-- Indexes
 -- =========================
 
--- Perguntas por dataset.
+-- Questions by dataset.
 CREATE INDEX idx_perguntas_dataset
 ON perguntas(id_dataset);
 
--- Respostas por pergunta.
+-- Answers by question.
 CREATE INDEX idx_respostas_pergunta
 ON respostas_atividade_1(id_pergunta);
 
--- Respostas por modelo candidato.
+-- Answers by candidate model.
 CREATE INDEX idx_respostas_modelo
 ON respostas_atividade_1(id_modelo);
 
--- Avaliações por resposta.
+-- Active prompt version per dataset.
+CREATE UNIQUE INDEX idx_prompt_juizes_active_per_dataset
+ON prompt_juizes(id_dataset)
+WHERE ativo;
+
+-- Evaluations by answer.
 CREATE INDEX idx_avaliacoes_resposta
 ON avaliacoes_juiz(id_resposta_ativa1);
 
--- Avaliações por modelo juiz.
+-- Evaluations by judge model.
 CREATE INDEX idx_avaliacoes_juiz
 ON avaliacoes_juiz(id_modelo_juiz);
