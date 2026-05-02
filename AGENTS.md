@@ -55,6 +55,8 @@ make web-up
 
 This command is the canonical way to rebuild/restart the local Web UI and refresh the content served on port `8000`.
 
+Exception: if provider calls are already in progress, do not run `make web-up`. Inform the user that the Web UI deploy is blocked by the active provider calls and ask them to stop or confirm completion of the current processing before running `make web-up`.
+
 ## Output defaults
 
 For implementation work, respond with:

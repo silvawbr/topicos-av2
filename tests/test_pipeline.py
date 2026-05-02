@@ -172,6 +172,54 @@ class ModelSpecificDailyTokenQuotaJudgeClient(FakeJudgeClient):
         )
 
 
+class ConcurrencyLimitJudgeClient(FakeJudgeClient):
+    def __init__(self, scores: dict[str, int], *, slow_model: str, limited_model: str) -> None:
+        super().__init__(scores)
+        self.slow_model = slow_model
+        self.limited_model = limited_model
+        self.limited_fail_once = True
+        self.events: list[tuple[str, str]] = []
+        self.current_by_model: dict[str, int] = {}
+        self.max_by_model: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def judge(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        requested_model: str | None = None,
+        endpoint_key: str | None = None,
+    ) -> JudgeRawResponse:
+        with self._lock:
+            self.events.append(("start", model))
+            current = self.current_by_model.get(model, 0) + 1
+            self.current_by_model[model] = current
+            self.max_by_model[model] = max(self.max_by_model.get(model, 0), current)
+        try:
+            if model == self.limited_model and self.limited_fail_once:
+                self.limited_fail_once = False
+                self.calls.append(model)
+                self.endpoint_keys.append(endpoint_key)
+                raise RemoteJudgeError(
+                    (
+                        "Remote judge returned HTTP 429: Concurrency limit exceeded. "
+                        "Active concurrent requests: 1 units. This request requires: 4 units."
+                    ),
+                    status_code=429,
+                    retryable=True,
+                )
+            if model == self.slow_model:
+                time.sleep(0.03)
+            response = super().judge(prompt, model, requested_model=requested_model, endpoint_key=endpoint_key)
+            with self._lock:
+                self.events.append(("end", model))
+            return response
+        finally:
+            with self._lock:
+                self.current_by_model[model] -= 1
+
+
 class EventRecordingJudgeClient(FakeJudgeClient):
     def __init__(self, scores: dict[str, int], slow_model: str) -> None:
         super().__init__(scores)
@@ -670,6 +718,64 @@ def test_adaptive_scheduler_stops_on_daily_token_quota_429_without_retry() -> No
     assert any(message == "adaptive_task_failed" for message, _ in audit.events)
     assert any(message == "adaptive_group_disabled" for message, _ in audit.events)
     assert not any(message == "adaptive_task_requeued" for message, _ in audit.events)
+
+
+def test_adaptive_scheduler_waits_for_other_judge_on_provider_concurrency_limit() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_EXECUTION_STRATEGY"] = "adaptive"
+    env["JUDGE_ADAPTIVE_INITIAL_CONCURRENCY"] = "1"
+    env["JUDGE_ADAPTIVE_MAX_CONCURRENCY"] = "1"
+    env["JUDGE_ADAPTIVE_MAX_RETRIES"] = "3"
+    settings = load_settings(dotenv_path=None, env=env)
+    config = resolve_runtime_config(settings, panel_mode="primary_only")
+    repo = InMemoryJudgeRepository()
+    audit = RecordingAudit()
+    judge_1 = "openai/gpt-oss-120b"
+    judge_2 = "meta-llama/Llama-3.3-70B-Instruct"
+    client = ConcurrencyLimitJudgeClient(
+        {judge_1: 5, judge_2: 4},
+        slow_model=judge_1,
+        limited_model=judge_2,
+    )
+
+    summary = JudgePipeline(repo, client, audit=audit, jitter_func=lambda: 0).run([answer_with_id(1)], config)
+
+    assert summary.executed_evaluations == 2
+    assert client.calls == [judge_2, judge_1, judge_2]
+    assert client.events.index(("end", judge_1)) < client.events.index(("start", judge_2), 2)
+    assert any(message == "adaptive_task_waiting_for_global_idle" for message, _ in audit.events)
+    assert not any(message == "adaptive_task_requeued" for message, _ in audit.events)
+
+
+def test_adaptive_scheduler_still_scales_healthy_judge_while_other_waits_for_idle() -> None:
+    env = dict(BASE_ENV)
+    env["JUDGE_EXECUTION_STRATEGY"] = "adaptive"
+    env["JUDGE_ADAPTIVE_INITIAL_CONCURRENCY"] = "1"
+    env["JUDGE_ADAPTIVE_MAX_CONCURRENCY"] = "2"
+    settings = load_settings(dotenv_path=None, env=env)
+    config = resolve_runtime_config(settings, panel_mode="primary_only")
+    repo = InMemoryJudgeRepository()
+    audit = RecordingAudit()
+    judge_1 = "openai/gpt-oss-120b"
+    judge_2 = "meta-llama/Llama-3.3-70B-Instruct"
+    client = ConcurrencyLimitJudgeClient(
+        {judge_1: 5, judge_2: 4},
+        slow_model=judge_1,
+        limited_model=judge_2,
+    )
+
+    summary = JudgePipeline(repo, client, audit=audit, jitter_func=lambda: 0).run(
+        [answer_with_id(1), answer_with_id(2), answer_with_id(3)],
+        config,
+    )
+
+    assert summary.executed_evaluations == 6
+    assert client.max_by_model[judge_1] == 2
+    assert any(
+        message == "adaptive_concurrency_increased" and f"model={judge_1}" in str(detail)
+        for message, detail in audit.events
+    )
+    assert any(message == "adaptive_task_waiting_for_global_idle" for message, _ in audit.events)
 
 
 def test_adaptive_scheduler_continues_other_models_after_one_model_quota_failure() -> None:

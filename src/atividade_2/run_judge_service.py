@@ -624,6 +624,12 @@ def _apply_request_overrides(settings: JudgeSettings, request: RunJudgeRequest) 
             api_key=request.remote_secondary_judge_api_key,
             label="secondary judge",
         )
+    elif request.endpoint_source_secondary == "env" and "SECONDARY_JUDGE" not in endpoint_overrides:
+        endpoint_overrides["SECONDARY_JUDGE"] = _complete_endpoint_override(
+            base_url=primary_base_url,
+            api_key=primary_api_key,
+            label="secondary judge",
+        )
     elif request.endpoint_source_secondary == "judge":
         endpoint_overrides["SECONDARY_JUDGE"] = _complete_endpoint_override(
             base_url=primary_base_url,
@@ -637,6 +643,12 @@ def _apply_request_overrides(settings: JudgeSettings, request: RunJudgeRequest) 
             label="arbiter judge",
         )
     elif request.endpoint_source_arbiter == "judge":
+        endpoint_overrides["ARBITER"] = _complete_endpoint_override(
+            base_url=primary_base_url,
+            api_key=primary_api_key,
+            label="arbiter judge",
+        )
+    elif request.endpoint_source_arbiter == "env" and "ARBITER" not in endpoint_overrides:
         endpoint_overrides["ARBITER"] = _complete_endpoint_override(
             base_url=primary_base_url,
             api_key=primary_api_key,

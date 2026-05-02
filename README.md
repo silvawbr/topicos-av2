@@ -19,7 +19,8 @@ Este repositório contém a fundação local do projeto e a pipeline inicial de 
 - `outputs/backup/`: backups SQL gerados por `make db-backup`.
 - `outputs/audit/`: logs locais gerados por `run-judge`.
 - `scripts/`: automações locais de banco.
-- `backup_atividade_2.sql`: backup SQL inicial usado para restaurar o banco AV2.
+- `backup_atividade_2_reset.sql`: backup SQL fixo usado para iniciar/resetar o banco AV2.
+- `backup_atividade_2.sql`: última versão compartilhável gerada por `make db-backup` quando `APP_ENV=prod`.
 
 ## Setup Python
 
@@ -69,7 +70,7 @@ Restaure o backup inicial somente quando o banco estiver vazio:
 make db-migrate-or-create
 ```
 
-Esse comando usa `backup_atividade_2.sql`. Se o banco já tiver tabelas públicas, o restore é ignorado para evitar sobrescrever dados locais.
+Esse comando usa `backup_atividade_2_reset.sql`. Se o banco já tiver tabelas públicas, o restore é ignorado para evitar sobrescrever dados locais.
 
 Para forçar o restore sobre um banco já populado, limpando o schema `public` antes de restaurar:
 
@@ -113,7 +114,7 @@ O arquivo gerado segue o formato:
 outputs/backup/atividade_2_YYYYmmdd_HHMMSS.sql
 ```
 
-Backups gerados localmente são ignorados pelo Git. O backup inicial `backup_atividade_2.sql` permanece versionado.
+Cada execução grava um arquivo timestampado em `outputs/backup/`. Quando `APP_ENV=prod`, a execução também atualiza `backup_atividade_2.sql` na raiz com a última versão do backup. Em `dev` e `test`, a raiz não é atualizada. Os arquivos timestampados mantêm o histórico local e são ignorados pelo Git; o arquivo da raiz é único, compartilhável e permanece versionado. O baseline de reset fica separado em `backup_atividade_2_reset.sql` e não é sobrescrito por esse fluxo.
 
 ## Running the LLM-as-a-Judge pipeline with a remote model
 
@@ -225,6 +226,8 @@ O modo `single` usa `REMOTE_JUDGE_MODEL`, o mesmo modelo do juiz 1. Se só a URL
 
 | Variável | Padrão recomendado | Quando mudar |
 |---|---|---|
+| `APP_ENV` | `dev` | Use `prod` para publicar a última versão do backup em `backup_atividade_2.sql`; `dev` e `test` salvam apenas em `outputs/backup/`. |
+| `BACKUP_ROOT_FILE` | `backup_atividade_2.sql` | Caminho do arquivo único de última versão. No container Web, é sobrescrito para `/workspace/backup_atividade_2.sql` para escrever na raiz do repositório host. |
 | `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/app_dev` | Se seu banco usa outra porta, usuário ou database. |
 | `JUDGE_PROVIDER` | `remote_http` | Não mude por enquanto. |
 | `JUDGE_PANEL_MODE` | `2plus1` | Use `single` para smoke test barato. |
@@ -235,7 +238,7 @@ O modo `single` usa `REMOTE_JUDGE_MODEL`, o mesmo modelo do juiz 1. Se só a URL
 | `JUDGE_ALWAYS_RUN_ARBITER` | `false` | Use `true` só para auditoria/amostra. |
 | `JUDGE_EXECUTION_STRATEGY` | `sequential` | Use `parallel` para concorrência fixa ou `adaptive` para ajuste por endpoint/modelo. |
 | `JUDGE_BATCH_SIZE` | `10` | Quantas respostas pendentes buscar por execução incremental. |
-| `JUDGE_ADAPTIVE_INITIAL_CONCURRENCY` | `2` | Concorrência inicial por grupo no modo `adaptive`. |
+| `JUDGE_ADAPTIVE_INITIAL_CONCURRENCY` | `1` | Concorrência inicial por grupo no modo `adaptive`. |
 | `JUDGE_ADAPTIVE_MAX_CONCURRENCY` | `4` | Teto local de concorrência por grupo no modo `adaptive`. |
 | `JUDGE_ADAPTIVE_SUCCESS_THRESHOLD` | `5` | Sucessos consecutivos antes de aumentar concorrência em `+1`. |
 | `JUDGE_ADAPTIVE_MAX_RETRIES` | `3` | Retentativas para `429`, `5xx` e timeouts. |
@@ -493,7 +496,7 @@ make clean
 ```
 
 `make db-reset` remove o volume local do PostgreSQL. Use apenas quando quiser descartar o banco local e restaurar do zero.
-`make db-migrate-or-create FORCE=1` limpa o schema `public` do banco atual e restaura `backup_atividade_2.sql` sem depender de o banco estar vazio.
+`make db-migrate-or-create FORCE=1` limpa o schema `public` do banco atual e restaura `backup_atividade_2_reset.sql` sem depender de o banco estar vazio.
 
 ## Fluxo Recomendado
 

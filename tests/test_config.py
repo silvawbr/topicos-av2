@@ -21,6 +21,8 @@ BASE_ENV = {
 def test_settings_load_default_models_from_env() -> None:
     settings = load_settings(dotenv_path=None, env=BASE_ENV)
 
+    assert settings.app_env == "dev"
+    assert settings.backup_root_file == "backup_atividade_2.sql"
     assert settings.remote_judge_base_url == "https://example.invalid/v1"
     assert settings.remote_judge_api_key == "test-key"
     assert settings.remote_judge_endpoints == {}
@@ -29,12 +31,38 @@ def test_settings_load_default_models_from_env() -> None:
     assert settings.remote_arbiter_judge_model == "m-prometheus-14b"
     assert settings.judge_execution_strategy == "sequential"
     assert settings.judge_batch_size == 10
-    assert settings.judge_adaptive_initial_concurrency == 2
+    assert settings.judge_adaptive_initial_concurrency == 1
     assert settings.judge_adaptive_max_concurrency == 4
     assert settings.judge_adaptive_success_threshold == 5
     assert settings.judge_adaptive_max_retries == 3
     assert settings.judge_adaptive_base_backoff_seconds == 2.0
     assert settings.judge_adaptive_max_backoff_seconds == 60.0
+
+
+def test_app_env_can_be_loaded_from_env() -> None:
+    env = dict(BASE_ENV)
+    env["APP_ENV"] = "prod"
+
+    settings = load_settings(dotenv_path=None, env=env)
+
+    assert settings.app_env == "prod"
+
+
+def test_backup_root_file_can_be_loaded_from_env() -> None:
+    env = dict(BASE_ENV)
+    env["BACKUP_ROOT_FILE"] = "/workspace/backup_atividade_2.sql"
+
+    settings = load_settings(dotenv_path=None, env=env)
+
+    assert settings.backup_root_file == "/workspace/backup_atividade_2.sql"
+
+
+def test_invalid_app_env_fails() -> None:
+    env = dict(BASE_ENV)
+    env["APP_ENV"] = "staging"
+
+    with pytest.raises(ConfigurationError, match="APP_ENV"):
+        load_settings(dotenv_path=None, env=env)
 
 
 def test_batch_size_can_be_loaded_from_env() -> None:

@@ -31,10 +31,12 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-app_dev}
+      BACKUP_ROOT_FILE: /workspace/backup_atividade_2.sql
     ports:
       - "127.0.0.1:${WEB_PORT:-8000}:8000"
     volumes:
       - ./outputs:/app/outputs
+      - .:/workspace
     depends_on:
       postgres:
         condition: service_healthy

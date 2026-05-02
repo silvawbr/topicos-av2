@@ -503,7 +503,10 @@ def test_web_index_contains_progress_element() -> None:
     assert 'id="database-restore-file" type="file" accept=".sql,application/sql,text/plain" hidden>' in response.text
     assert 'id="database-dump" type="button" role="menuitem">Exportar Dump do Banco</button>' in response.text
     assert 'id="database-clean-dialog" class="confirm-dialog"' in response.text
-    assert 'id="database-clean-backup-confirm" class="secondary backup-clean-button" type="button">Fazer backup e limpar</button>' in response.text
+    assert "gera um backup automaticamente antes de limpar o schema public" in response.text
+    assert 'id="database-clean-confirm" class="danger-button" type="button">Continuar</button>' in response.text
+    assert "database-clean-backup-confirm" not in response.text
+    assert "Fazer backup e limpar" not in response.text
     assert 'id="database-dump-dialog" class="confirm-dialog"' in response.text
     assert 'id="database-dump-status" class="status"></span>' in response.text
     assert "Dump completo em outputs/backup." not in response.text

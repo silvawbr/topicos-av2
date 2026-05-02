@@ -34,10 +34,12 @@ class DatabaseDumpService:
         self,
         *,
         output_dir: Path | str = Path("outputs") / "backup",
+        root_backup_file: Path | str = Path("backup_atividade_2.sql"),
         settings_loader: Callable[[], Any] = load_settings,
         now: Callable[[], datetime] = datetime.now,
     ) -> None:
         self.output_dir = Path(output_dir)
+        self.root_backup_file = Path(root_backup_file)
         self._settings_loader = settings_loader
         self._now = now
 
@@ -64,6 +66,11 @@ class DatabaseDumpService:
             detail = _redact(completed.stderr or completed.stdout or "pg_dump falhou.", settings.database_url)
             raise RuntimeError(f"Falha ao gerar dump do banco: {detail}") from None
 
+        configured_root_backup_file = Path(getattr(settings, "backup_root_file", self.root_backup_file))
+        root_backup_path = configured_root_backup_file.resolve()
+        if settings.app_env == "prod" and output_path != root_backup_path:
+            shutil.copy2(output_path, root_backup_path)
+
         return DatabaseDumpResult(
             filename=filename,
             path=str(output_path),
@@ -79,7 +86,7 @@ class DatabaseResetService:
     def __init__(
         self,
         *,
-        backup_file: Path | str = Path("backup_atividade_2.sql"),
+        backup_file: Path | str = Path("backup_atividade_2_reset.sql"),
         settings_loader: Callable[[], Any] = load_settings,
         timeout_seconds: int = 600,
     ) -> None:

@@ -80,10 +80,11 @@ make db-dump-root-backup
 Atualiza:
 
 ```text
+outputs/backup/atividade_2_YYYYmmdd_HHMMSS.sql
 backup_atividade_2.sql
 ```
 
-Esse arquivo da raiz e a base canonica usada por `make db-migrate-or-create`.
+O arquivo timestampado preserva o historico local. O arquivo unico da raiz e atualizado apenas com `APP_ENV=prod`; em `dev` e `test`, o dump fica somente em `outputs/backup/`. A base fixa de reset usada por `make db-migrate-or-create` fica em `backup_atividade_2_reset.sql`.
 
 ### 5. Gerar tudo de uma vez
 

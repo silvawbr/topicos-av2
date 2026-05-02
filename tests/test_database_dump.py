@@ -2,7 +2,67 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from atividade_2 import database_dump
-from atividade_2.database_dump import DatabaseResetService
+from atividade_2.database_dump import DatabaseDumpService, DatabaseResetService
+
+
+def test_create_dump_writes_only_history_outside_prod(monkeypatch, tmp_path) -> None:
+    output_dir = tmp_path / "outputs" / "backup"
+    root_backup = tmp_path / "backup_atividade_2.sql"
+
+    monkeypatch.setattr(database_dump.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def fake_run(command, **kwargs):
+        output_path = Path(command[command.index("--file") + 1])
+        output_path.write_text("SELECT 1;\n", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(database_dump.subprocess, "run", fake_run)
+
+    service = DatabaseDumpService(
+        output_dir=output_dir,
+        root_backup_file=root_backup,
+        settings_loader=lambda: SimpleNamespace(
+            app_env="dev",
+            database_url="postgresql://postgres:postgres@localhost:5432/app_dev",
+        ),
+        now=lambda: database_dump.datetime(2026, 5, 2, 9, 30, 0),
+    )
+
+    result = service.create_dump()
+
+    history_backup = output_dir / "atividade_2_20260502_093000.sql"
+    assert history_backup.read_text(encoding="utf-8") == "SELECT 1;\n"
+    assert not root_backup.exists()
+    assert result.path == str(history_backup.resolve())
+    assert result.filename == "atividade_2_20260502_093000.sql"
+
+
+def test_create_dump_updates_root_backup_in_prod(monkeypatch, tmp_path) -> None:
+    output_dir = tmp_path / "outputs" / "backup"
+    root_backup = tmp_path / "backup_atividade_2.sql"
+
+    monkeypatch.setattr(database_dump.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def fake_run(command, **kwargs):
+        output_path = Path(command[command.index("--file") + 1])
+        output_path.write_text("SELECT 1;\n", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(database_dump.subprocess, "run", fake_run)
+
+    service = DatabaseDumpService(
+        output_dir=output_dir,
+        settings_loader=lambda: SimpleNamespace(
+            app_env="prod",
+            database_url="postgresql://postgres:postgres@localhost:5432/app_dev",
+            backup_root_file=str(root_backup),
+        ),
+        now=lambda: database_dump.datetime(2026, 5, 2, 9, 30, 0),
+    )
+
+    service.create_dump()
+
+    assert root_backup.read_text(encoding="utf-8") == "SELECT 1;\n"
 
 
 def test_restore_backup_adds_dashboard_compatibility_columns(monkeypatch, tmp_path) -> None:
@@ -29,3 +89,9 @@ def test_restore_backup_adds_dashboard_compatibility_columns(monkeypatch, tmp_pa
     assert "ADD COLUMN IF NOT EXISTS rodada_julgamento" in alter_sql
     assert "ADD COLUMN IF NOT EXISTS motivo_acionamento" in alter_sql
     assert "ADD COLUMN IF NOT EXISTS status_avaliacao" in alter_sql
+
+
+def test_reset_service_defaults_to_fixed_reset_backup() -> None:
+    service = DatabaseResetService()
+
+    assert service.backup_file == Path("backup_atividade_2_reset.sql")

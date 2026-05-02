@@ -788,6 +788,7 @@ class _AdaptiveGroupState:
     rate_limits: int = 0
     retries: int = 0
     requeued: int = 0
+    wait_for_global_idle: bool = False
     disabled: bool = False
 
 
@@ -859,7 +860,7 @@ class _AdaptiveScheduler:
                     try:
                         completed = future.result()
                     except Exception as error:
-                        self._handle_failure(error, queued, pending, state)
+                        self._handle_failure(error, queued, pending, state, active_other_tasks=len(futures))
                     else:
                         self._handle_success(state)
                         records.append(completed.record)
@@ -891,6 +892,11 @@ class _AdaptiveScheduler:
         while index < len(pending):
             queued = pending[index]
             state = self.groups[queued.group_key]
+            if state.wait_for_global_idle:
+                if futures:
+                    index += 1
+                    continue
+                state.wait_for_global_idle = False
             if state.disabled:
                 pending.pop(index)
                 continue
@@ -924,7 +930,7 @@ class _AdaptiveScheduler:
         state.successes += 1
         state.consecutive_failures = 0
         state.successes_since_change += 1
-        threshold = self.config.settings.judge_adaptive_success_threshold
+        threshold = self._success_threshold(state)
         if (
             state.successes_since_change >= threshold
             and state.current_concurrency < state.max_concurrency
@@ -939,12 +945,19 @@ class _AdaptiveScheduler:
                 )
             )
 
+    def _success_threshold(self, state: _AdaptiveGroupState) -> int:
+        if any(group is not state and group.wait_for_global_idle for group in self.groups.values()):
+            return 1
+        return self.config.settings.judge_adaptive_success_threshold
+
     def _handle_failure(
         self,
         error: Exception,
         queued: _QueuedAdaptiveTask,
         pending: list[_QueuedAdaptiveTask],
         state: _AdaptiveGroupState,
+        *,
+        active_other_tasks: int,
     ) -> None:
         state.failures += 1
         state.consecutive_failures += 1
@@ -953,6 +966,28 @@ class _AdaptiveScheduler:
             state.timeouts += 1
         if isinstance(error, RemoteJudgeError) and error.status_code == 429:
             state.rate_limits += 1
+
+        if _should_wait_for_global_idle(error, state, active_other_tasks):
+            state.wait_for_global_idle = True
+            pending.append(
+                _QueuedAdaptiveTask(
+                    task=queued.task,
+                    group_key=queued.group_key,
+                    attempt=queued.attempt,
+                    ready_at=self.pipeline.monotonic_func(),
+                )
+            )
+            pending.sort(key=lambda item: (item.task.priority, item.ready_at, item.task.sequence))
+            self.pipeline.audit.event(
+                AuditEvent(
+                    "adaptive_task_waiting_for_global_idle",
+                    (
+                        f"{state.key.label} answer_id={queued.task.answer.answer_id} "
+                        f"role={queued.task.stored_role} active_other_tasks={active_other_tasks} error={error}"
+                    ),
+                )
+            )
+            return
 
         if not _should_retry(error) or queued.attempt >= self.config.settings.judge_adaptive_max_retries:
             self._disable_group_after_failure(error, queued, pending, state)
@@ -1142,6 +1177,21 @@ def _fingerprint(value: str | None) -> str:
 
 def _should_retry(error: Exception) -> bool:
     return isinstance(error, RemoteJudgeError) and error.retryable
+
+
+def _should_wait_for_global_idle(
+    error: Exception,
+    state: _AdaptiveGroupState,
+    active_other_tasks: int,
+) -> bool:
+    return (
+        isinstance(error, RemoteJudgeError)
+        and error.status_code == 429
+        and error.retryable
+        and state.current_concurrency <= 1
+        and active_other_tasks > 0
+        and "concurrency limit exceeded" in str(error).lower()
+    )
 
 
 def _is_timeout_error(error: Exception) -> bool:

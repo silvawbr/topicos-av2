@@ -902,7 +902,6 @@ _INDEX_HTML = """
     .confirm-dialog p { margin:0; color:var(--muted); font-size:13px; line-height:1.45; }
     .confirm-actions { display:flex; justify-content:flex-end; align-items:center; gap:8px; padding:12px 14px; border-top:1px solid var(--line); }
     .confirm-actions button { min-width:96px; white-space:nowrap; }
-    .confirm-actions .backup-clean-button { min-width:206px; }
     .danger-button { border-color:var(--bad); background:var(--bad); color:#fff; }
     .ok { color:var(--ok); }
     .bad { color:var(--bad); }
@@ -1402,12 +1401,11 @@ _INDEX_HTML = """
     </div>
     <div class="dialog-body">
       <p>Resetar o banco para o estado inicial?</p>
-      <p>Isso limpa o schema public, restaura backup_atividade_2.sql e valida o restore.</p>
+      <p>Ao continuar, o sistema gera um backup automaticamente antes de limpar o schema public, restaurar backup_atividade_2_reset.sql e validar o restore.</p>
     </div>
     <div class="confirm-actions">
       <button id="database-clean-cancel" class="secondary" type="button">Cancelar</button>
-      <button id="database-clean-backup-confirm" class="secondary backup-clean-button" type="button">Fazer backup e limpar</button>
-      <button id="database-clean-confirm" class="danger-button" type="button">Limpar</button>
+      <button id="database-clean-confirm" class="danger-button" type="button">Continuar</button>
     </div>
   </dialog>
   <dialog id="database-dump-dialog" class="confirm-dialog">
@@ -2826,14 +2824,12 @@ _INDEX_HTML = """
       return new Promise((resolve) => {
         const cancel = document.getElementById("database-clean-cancel");
         const confirm = document.getElementById("database-clean-confirm");
-        const backupConfirm = document.getElementById("database-clean-backup-confirm");
         let settled = false;
         const cleanup = (action) => {
           if (settled) return;
           settled = true;
           cancel.onclick = null;
           confirm.onclick = null;
-          backupConfirm.onclick = null;
           dialog.oncancel = null;
           dialog.onclose = null;
           if (dialog.open) dialog.close();
@@ -2841,7 +2837,6 @@ _INDEX_HTML = """
         };
         cancel.onclick = () => cleanup("cancel");
         confirm.onclick = () => cleanup("clean");
-        backupConfirm.onclick = () => cleanup("backup-clean");
         dialog.oncancel = (event) => {
           event.preventDefault();
           cleanup("cancel");
@@ -2896,11 +2891,9 @@ _INDEX_HTML = """
       const status = document.getElementById("database-dump-status");
       button.disabled = true;
       try {
-        if (cleanAction === "backup-clean") {
-          status.textContent = "Gerando dump antes de limpar...";
-          const dumpData = await postJson("/api/database-dumps", {});
-          showDatabaseDumpDialog(dumpData);
-        }
+        status.textContent = "Gerando dump antes de limpar...";
+        const dumpData = await postJson("/api/database-dumps", {});
+        showDatabaseDumpDialog(dumpData);
         status.textContent = "Restaurando banco para o estado inicial...";
         const data = await postJson("/api/database-reset", {});
         status.textContent = data.message || "Banco restaurado para o estado inicial.";
