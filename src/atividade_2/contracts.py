@@ -10,6 +10,7 @@ JudgeProvider = Literal["remote_http"]
 JudgeRole = Literal["single", "primary", "arbiter"]
 StoredJudgeRole = Literal["principal", "controle", "arbitro"]
 JudgeExecutionStrategy = Literal["sequential", "parallel", "adaptive"]
+AppEnvironment = Literal["dev", "test", "prod"]
 
 PROMPT_VERSION = "av2-judge-v3"
 RUBRIC_VERSION = "av2-legal-rubric-v2"
@@ -35,6 +36,7 @@ class RemoteJudgeEndpoint:
 class JudgeSettings:
     """Settings loaded from ``.env`` and process environment."""
 
+    app_env: AppEnvironment
     database_url: str
     judge_provider: JudgeProvider
     remote_judge_base_url: str | None

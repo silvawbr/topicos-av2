@@ -21,6 +21,7 @@ DEFAULT_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/app_dev"
 SUPPORTED_PANEL_MODES: set[str] = {"single", "primary_only", "2plus1"}
 SUPPORTED_PROVIDERS: set[str] = {"remote_http"}
 SUPPORTED_EXECUTION_STRATEGIES: set[str] = {"sequential", "parallel", "adaptive"}
+SUPPORTED_APP_ENVS: set[str] = {"dev", "test", "prod"}
 
 
 class ConfigurationError(ValueError):
@@ -71,7 +72,7 @@ def load_settings(dotenv_path: str | Path | None = ".env", env: Mapping[str, str
     adaptive_initial_concurrency = _parse_int(
         values,
         "JUDGE_ADAPTIVE_INITIAL_CONCURRENCY",
-        2,
+        1,
         minimum=1,
     )
     adaptive_max_concurrency = _parse_int(
@@ -86,6 +87,7 @@ def load_settings(dotenv_path: str | Path | None = ".env", env: Mapping[str, str
         )
 
     return JudgeSettings(
+        app_env=_get_choice(values, "APP_ENV", "dev", SUPPORTED_APP_ENVS),  # type: ignore[arg-type]
         database_url=values.get("DATABASE_URL", DEFAULT_DATABASE_URL),
         judge_provider=provider,  # type: ignore[arg-type]
         remote_judge_base_url=_empty_to_none(values.get("REMOTE_JUDGE_BASE_URL")),

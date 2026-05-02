@@ -15,7 +15,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends postgresql-client-18 \
     && rm -rf /var/lib/apt/lists/* /tmp/postgresql.asc
 
-COPY pyproject.toml README.md backup_atividade_2.sql ./
+COPY pyproject.toml README.md backup_atividade_2_reset.sql ./
 COPY src ./src
 
 RUN python -m pip install --no-cache-dir --upgrade pip \
