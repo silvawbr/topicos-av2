@@ -401,6 +401,90 @@ class FakeDatabaseResetService:
         }
 
 
+class FakeJudgePromptConfigService:
+    def __init__(self) -> None:
+        self.saved = []
+
+    def options(self) -> dict:
+        return {"datasets": [{"value": "J1", "label": "J1"}]}
+
+    def get(self, *, dataset: str) -> dict:
+        return {
+            "record": {
+                "prompt_id": 12,
+                "dataset": dataset,
+                "version": 3,
+                "created_by": "Diego",
+                "active": True,
+                "prompt": "[PERSONA]\n\n[CONTEXTO]\n\n[RUBRICA]\n\n[SAIDA]",
+                "persona": "persona",
+                "context": "contexto",
+                "rubric": "rubrica",
+                "output": "saida",
+                "created_at": "2026-05-02T10:00:00",
+            },
+            "versions": [
+                {
+                    "prompt_id": 12,
+                    "version": 3,
+                    "created_by": "Diego",
+                    "created_at": "2026-05-02T10:00:00",
+                    "active": True,
+                    "prompt_chars": 44,
+                    "persona_chars": 7,
+                    "context_chars": 8,
+                    "rubric_chars": 8,
+                    "output_chars": 5,
+                }
+            ],
+            "preview": {
+                "dataset": dataset,
+                "question_id": 71,
+                "answer_id": 1,
+                "candidate_model": "modelo-candidato",
+                "rendered_prompt": "prompt montado",
+                "version": 3,
+            },
+        }
+
+    def save(
+        self,
+        *,
+        dataset: str,
+        prompt: str,
+        persona: str,
+        context: str,
+        rubric: str,
+        output: str,
+        changed_by: str,
+    ) -> dict:
+        self.saved.append((dataset, prompt, persona, context, rubric, output, changed_by))
+        return {
+            "record": {
+                "prompt_id": 13,
+                "dataset": dataset,
+                "version": 4,
+                "created_by": changed_by,
+                "active": True,
+                "prompt": prompt,
+                "persona": persona,
+                "context": context,
+                "rubric": rubric,
+                "output": output,
+                "created_at": "2026-05-02T10:05:00",
+            },
+            "versions": [],
+            "preview": {
+                "dataset": dataset,
+                "question_id": 71,
+                "answer_id": 1,
+                "candidate_model": "modelo-candidato",
+                "rendered_prompt": "prompt montado",
+                "version": 4,
+            },
+        }
+
+
 def test_web_index_contains_progress_element() -> None:
     client = TestClient(create_app(FakeRunJudgeService()))
 
@@ -516,6 +600,57 @@ def test_dashboard_tab_selection_always_refreshes_dashboard_data() -> None:
     assert response.status_code == 200
     assert 'if (targetId === "dashboard-panel") loadDashboard();' in response.text
     assert 'if (targetId === "dashboard-panel" && !dashboardLoaded) loadDashboard();' not in response.text
+
+
+def test_web_index_contains_prompt_judges_tab() -> None:
+    client = TestClient(create_app(FakeRunJudgeService(), judge_prompt_service=FakeJudgePromptConfigService()))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'data-tab="prompt-panel">Prompt Juizes</button>' in response.text
+    assert 'id="prompt_dataset"' in response.text
+    assert 'id="prompt_save"' in response.text
+    assert 'id="prompt_logs_body"' in response.text
+    assert 'id="prompt_preview_content"' in response.text
+
+
+def test_judge_prompt_endpoints_return_options_and_allow_save() -> None:
+    prompt_service = FakeJudgePromptConfigService()
+    client = TestClient(create_app(FakeRunJudgeService(), judge_prompt_service=prompt_service))
+    token = client.get("/api/config").json()["csrf_token"]
+
+    options = client.get("/api/judge-prompts/options")
+    assert options.status_code == 200
+    assert options.json()["datasets"][0]["value"] == "J1"
+
+    current = client.get("/api/judge-prompts", params={"dataset": "J1"})
+    assert current.status_code == 200
+    assert current.json()["record"]["persona"] == "persona"
+
+    saved = client.put(
+        "/api/judge-prompts",
+        headers={"x-csrf-token": token},
+        json={
+            "dataset": "J1",
+            "prompt": "[PERSONA]",
+            "persona": "nova persona",
+            "context": "novo contexto",
+            "rubric": "nova rubrica",
+            "output": "nova saida",
+            "changed_by": "Diego",
+        },
+    )
+    assert saved.status_code == 200
+    assert prompt_service.saved[-1] == (
+        "J1",
+        "[PERSONA]",
+        "nova persona",
+        "novo contexto",
+        "nova rubrica",
+        "nova saida",
+        "Diego",
+    )
 
 
 def test_tab_navigation_does_not_cancel_active_run_or_stop_polling() -> None:
