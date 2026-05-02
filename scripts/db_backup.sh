@@ -18,9 +18,11 @@ POSTGRES_CONTAINER_NAME="${POSTGRES_CONTAINER_NAME:-topicos-av2-postgres}"
 POSTGRES_USER="${POSTGRES_USER:-postgres}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}"
 POSTGRES_DB="${POSTGRES_DB:-app_dev}"
+APP_ENV="${APP_ENV:-dev}"
 timestamp="$(date +%Y%m%d_%H%M%S)"
 backup_dir="outputs/backup"
 backup_file="${backup_dir}/atividade_2_${timestamp}.sql"
+root_backup_file="backup_atividade_2.sql"
 
 mkdir -p "$backup_dir"
 
@@ -30,3 +32,9 @@ docker exec \
   pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" > "$backup_file"
 
 echo "Backup written to $backup_file"
+if [ "$APP_ENV" = "prod" ]; then
+  cp "$backup_file" "$root_backup_file"
+  echo "Latest root backup written to $root_backup_file"
+else
+  echo "Latest root backup skipped for APP_ENV=$APP_ENV"
+fi

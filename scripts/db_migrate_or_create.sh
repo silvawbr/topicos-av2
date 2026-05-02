@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 FORCE_RESTORE=0
-BACKUP_FILE="backup_atividade_2.sql"
+BACKUP_FILE="backup_atividade_2_reset.sql"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in

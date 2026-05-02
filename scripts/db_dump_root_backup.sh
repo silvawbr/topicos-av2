@@ -18,13 +18,19 @@ POSTGRES_CONTAINER_NAME="${POSTGRES_CONTAINER_NAME:-topicos-av2-postgres}"
 POSTGRES_USER="${POSTGRES_USER:-postgres}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}"
 POSTGRES_DB="${POSTGRES_DB:-app_dev}"
+APP_ENV="${APP_ENV:-dev}"
 
 if ! docker ps --format '{{.Names}}' | grep -Fx "$POSTGRES_CONTAINER_NAME" >/dev/null; then
   echo "PostgreSQL container is not running: $POSTGRES_CONTAINER_NAME" >&2
   exit 1
 fi
 
-output_file="backup_atividade_2.sql"
+timestamp="$(date +%Y%m%d_%H%M%S)"
+backup_dir="outputs/backup"
+backup_file="${backup_dir}/atividade_2_${timestamp}.sql"
+root_backup_file="backup_atividade_2.sql"
+
+mkdir -p "$backup_dir"
 
 docker exec \
   -e PGPASSWORD="$POSTGRES_PASSWORD" \
@@ -33,6 +39,12 @@ docker exec \
     -U "$POSTGRES_USER" \
     -d "$POSTGRES_DB" \
     --no-owner \
-    --no-privileges > "$output_file"
+    --no-privileges > "$backup_file"
 
-echo "Root backup written to $output_file"
+echo "Backup written to $backup_file"
+if [ "$APP_ENV" = "prod" ]; then
+  cp "$backup_file" "$root_backup_file"
+  echo "Latest root backup written to $root_backup_file"
+else
+  echo "Latest root backup skipped for APP_ENV=$APP_ENV"
+fi

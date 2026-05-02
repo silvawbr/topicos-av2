@@ -182,6 +182,39 @@ def test_resolve_copies_primary_env_endpoint_to_secondary() -> None:
     assert "test-key" not in resolved.command_preview
 
 
+def test_resolve_env_secondary_endpoint_falls_back_to_primary_when_env_missing() -> None:
+    service = RunJudgeService(settings_loader=lambda: load_settings(dotenv_path=None, env=BASE_ENV))
+
+    resolved = service.resolve(
+        RunJudgeRequest(
+            panel_mode="2plus1",
+            endpoint_source_secondary="env",
+        )
+    )
+
+    secondary = resolved.runtime_config.settings.remote_judge_endpoints["SECONDARY_JUDGE"]
+    assert secondary.base_url == "https://example.invalid/v1"
+    assert secondary.api_key == "test-key"
+
+
+def test_resolve_env_arbiter_endpoint_falls_back_to_primary_when_env_empty() -> None:
+    env = dict(BASE_ENV)
+    env["REMOTE_ARBITER_JUDGE_BASE_URL"] = ""
+    env["REMOTE_ARBITER_JUDGE_API_KEY"] = ""
+    service = RunJudgeService(settings_loader=lambda: load_settings(dotenv_path=None, env=env))
+
+    resolved = service.resolve(
+        RunJudgeRequest(
+            panel_mode="2plus1",
+            endpoint_source_arbiter="env",
+        )
+    )
+
+    arbiter = resolved.runtime_config.settings.remote_judge_endpoints["ARBITER"]
+    assert arbiter.base_url == "https://example.invalid/v1"
+    assert arbiter.api_key == "test-key"
+
+
 def test_resolve_copies_secondary_endpoint_to_arbiter() -> None:
     service = RunJudgeService(settings_loader=lambda: load_settings(dotenv_path=None, env=BASE_ENV))
 
