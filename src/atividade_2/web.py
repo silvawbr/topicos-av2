@@ -186,7 +186,9 @@ class JobRegistry:
 
         def update_progress(progress: BatchProgress) -> None:
             with self._lock:
-                self._jobs[run_id].progress = progress
+                job = self._jobs[run_id]
+                job.progress = progress
+                _sync_progress_with_execution_table(job)
 
         def update_eligibility(eligibility: EligibilitySummary) -> None:
             with self._lock:
@@ -196,7 +198,9 @@ class JobRegistry:
             if evaluation.status == "skipped":
                 return
             with self._lock:
-                _upsert_evaluation_event(self._jobs[run_id].evaluation_events, evaluation)
+                job = self._jobs[run_id]
+                _upsert_evaluation_event(job.evaluation_events, evaluation)
+                _sync_progress_with_execution_table(job)
 
         try:
             result = self.service.run(
@@ -438,7 +442,7 @@ def _serialize_job(job: JobState) -> dict:
         "audit_log_url": f"/api/runs/{job.run_id}/audit-log" if job.audit_log else None,
         "command_preview": job.command_preview,
         "eligibility": asdict(eligibility) if eligibility is not None else None,
-        "evaluation_events": [asdict(event) for event in job.evaluation_events],
+        "evaluation_events": [asdict(event) for event in _sorted_evaluation_events(job.evaluation_events)],
         "error": job.error,
         "result": _serialize_result(job.result) if job.result is not None else None,
     }
@@ -455,6 +459,18 @@ def _effective_progress(job: JobState, eligibility: EligibilitySummary | None) -
             executed_evaluations=summary.executed_evaluations,
             skipped_evaluations=summary.skipped_evaluations,
             arbiter_evaluations=summary.arbiter_evaluations,
+        )
+    if job.status in {"completed", "failed"}:
+        total = job.progress.total
+        if total == 0 and eligibility is not None:
+            total = eligibility.will_process
+        return BatchProgress(
+            current=total,
+            total=total,
+            percent=100,
+            executed_evaluations=job.progress.executed_evaluations,
+            skipped_evaluations=job.progress.skipped_evaluations,
+            arbiter_evaluations=job.progress.arbiter_evaluations,
         )
     if eligibility is not None and job.progress.total == 0:
         return BatchProgress(
@@ -652,6 +668,44 @@ def _upsert_evaluation_event(events: list[EvaluationProgress], event: Evaluation
     events.append(event)
 
 
+def _sync_progress_with_execution_table(job: JobState) -> None:
+    total = job.progress.total
+    if total == 0 and job.eligibility is not None:
+        total = job.eligibility.will_process
+    if total <= 0:
+        return
+    successful_answer_ids = {event.answer_id for event in job.evaluation_events if event.status == "success"}
+    current = min(total, len(successful_answer_ids))
+    if current == job.progress.current and total == job.progress.total:
+        return
+    job.progress = BatchProgress(
+        current=current,
+        total=total,
+        percent=int(current / total * 100),
+        executed_evaluations=job.progress.executed_evaluations,
+        skipped_evaluations=job.progress.skipped_evaluations,
+        arbiter_evaluations=job.progress.arbiter_evaluations,
+    )
+
+
+def _sorted_evaluation_events(events: list[EvaluationProgress]) -> list[EvaluationProgress]:
+    status_priority = {"running": 0, "failed": 1, "success": 2}
+    return sorted(
+        events,
+        key=lambda event: (
+            status_priority.get(event.status, 3),
+            event.dataset,
+            -event.question_id,
+            event.answer_id,
+            event.candidate_model,
+            event.judge_model,
+            event.role,
+            event.panel_mode,
+            event.trigger_reason or "",
+        ),
+    )
+
+
 def _evaluation_event_key(event: EvaluationProgress) -> tuple:
     return (
         event.dataset,
@@ -841,6 +895,19 @@ _INDEX_HTML = """
     .badge.failed { color:var(--bad); border-color:#f0b8b2; background:#fff5f5; }
     .badge.running { color:var(--accent); border-color:#b9d5eb; background:#f2f8fd; }
     .badge.skipped { color:var(--warn); border-color:#ead0a6; background:#fff8eb; }
+    #execution-table-body tr { background:#fff; transition:transform .42s ease, background-color .9s ease; }
+    #execution-table-body tr.execution-row-enter { animation:execution-row-running 1.4s ease-out; }
+    #execution-table-body tr.execution-row-success { animation:execution-row-success 1.5s ease-out; }
+    #execution-table-body tr.execution-row-failed { animation:execution-row-failed 1.5s ease-out; }
+    @keyframes execution-row-running { 0% { background:#dff0ff; } 100% { background:#fff; } }
+    @keyframes execution-row-success { 0% { background:#dff0ff; } 18% { background:#dff0ff; } 45% { background:#dff7e8; } 100% { background:#fff; } }
+    @keyframes execution-row-failed { 0% { background:#dff0ff; } 18% { background:#dff0ff; } 45% { background:#ffe4e0; } 100% { background:#fff; } }
+    @media (prefers-reduced-motion: reduce) {
+      #execution-table-body tr { transition:none; }
+      #execution-table-body tr.execution-row-enter,
+      #execution-table-body tr.execution-row-success,
+      #execution-table-body tr.execution-row-failed { animation:none; }
+    }
     .detail-button { min-height:30px; padding:0 9px; border-color:var(--line); background:#fff; color:var(--accent); font-size:12px; }
     dialog { width:min(900px, calc(100vw - 28px)); border:1px solid var(--line); border-radius:8px; padding:0; }
     dialog::backdrop { background:rgba(16,24,40,.42); }
@@ -1319,6 +1386,7 @@ _INDEX_HTML = """
     let currentAuditLogUrl = null;
     let activeRunId = null;
     let judgeModelOptions = [];
+    const executionTableState = new Map();
 
     function value(id) { return document.getElementById(id).value; }
     function setText(id, text) { document.getElementById(id).textContent = text ?? "-"; }
@@ -2278,8 +2346,10 @@ _INDEX_HTML = """
 
     function renderExecutionTable(events) {
       const body = document.getElementById("execution-table-body");
+      const previousRects = new Map(Array.from(body.querySelectorAll("tr[data-event-key]")).map((row) => [row.dataset.eventKey, row.getBoundingClientRect()]));
       body.textContent = "";
       if (!events.length) {
+        executionTableState.clear();
         const row = document.createElement("tr");
         const cell = document.createElement("td");
         cell.colSpan = 13;
@@ -2291,6 +2361,9 @@ _INDEX_HTML = """
       }
       events.forEach((event, index) => {
         const row = document.createElement("tr");
+        const eventKey = executionEventKey(event);
+        const previous = executionTableState.get(eventKey);
+        row.dataset.eventKey = eventKey;
         appendStatusCell(row, event.status);
         for (const value of [
           event.dataset,
@@ -2314,6 +2387,43 @@ _INDEX_HTML = """
         detailsCell.appendChild(button);
         row.appendChild(detailsCell);
         body.appendChild(row);
+        animateExecutionRow(row, previousRects.get(eventKey), previous?.status, event.status);
+        executionTableState.set(eventKey, {status: event.status});
+      });
+      const currentKeys = new Set(events.map(executionEventKey));
+      for (const key of executionTableState.keys()) {
+        if (!currentKeys.has(key)) executionTableState.delete(key);
+      }
+    }
+
+    function executionEventKey(event) {
+      return [
+        event.dataset,
+        event.question_id,
+        event.answer_id,
+        event.candidate_model,
+        event.judge_model,
+        event.role,
+        event.panel_mode,
+        event.trigger_reason || ""
+      ].map((value) => String(value ?? "")).join("\\u001f");
+    }
+
+    function animateExecutionRow(row, previousRect, previousStatus, nextStatus) {
+      const isNew = previousStatus === undefined;
+      const statusChanged = previousStatus !== undefined && previousStatus !== nextStatus;
+      if (isNew && nextStatus === "running") row.classList.add("execution-row-enter");
+      if (statusChanged && nextStatus === "success") row.classList.add("execution-row-success");
+      if (statusChanged && nextStatus === "failed") row.classList.add("execution-row-failed");
+      if (!statusChanged || !previousRect || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+      const nextRect = row.getBoundingClientRect();
+      const deltaY = previousRect.top - nextRect.top;
+      if (Math.abs(deltaY) < 1) return;
+      row.style.transform = `translateY(${deltaY}px)`;
+      row.style.transition = "transform 0s";
+      requestAnimationFrame(() => {
+        row.style.transition = "";
+        row.style.transform = "";
       });
     }
 
