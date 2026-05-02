@@ -31,14 +31,52 @@ CREATE TABLE public.avaliacoes_juiz (
     id_avaliacao integer NOT NULL,
     id_resposta_ativa1 integer NOT NULL,
     id_modelo_juiz integer NOT NULL,
+    id_prompt_juiz integer NOT NULL,
     nota_atribuida integer NOT NULL,
-    prompt_juiz text NOT NULL,
-    rubrica_utilizada text NOT NULL,
     chain_of_thought text NOT NULL,
+    papel_juiz character varying(20),
+    rodada_julgamento character varying(30),
+    motivo_acionamento text,
+    status_avaliacao character varying(20) DEFAULT 'success'::character varying,
     data_avaliacao timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT avaliacoes_juiz_nota_atribuida_check CHECK (((nota_atribuida >= 1) AND (nota_atribuida <= 5)))
 );
 
+--
+-- Name: prompt_juizes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.prompt_juizes (
+    id_prompt_juiz integer NOT NULL,
+    id_dataset integer NOT NULL,
+    versao integer NOT NULL,
+    ds_prompt text NOT NULL,
+    ds_persona text NOT NULL,
+    ds_contexto text NOT NULL,
+    ds_rubrica text NOT NULL,
+    ds_saida text NOT NULL,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    created_by character varying(120) DEFAULT 'system'::character varying NOT NULL,
+    ativo boolean DEFAULT false NOT NULL
+);
+
+--
+-- Name: prompt_juizes_id_prompt_juiz_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.prompt_juizes_id_prompt_juiz_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+--
+-- Name: prompt_juizes_id_prompt_juiz_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.prompt_juizes_id_prompt_juiz_seq OWNED BY public.prompt_juizes.id_prompt_juiz;
 
 --
 -- Name: avaliacoes_juiz_id_avaliacao_seq; Type: SEQUENCE; Schema: public; Owner: -
@@ -229,6 +267,12 @@ CREATE TABLE public.stage_respostas_obj_import (
 
 ALTER TABLE ONLY public.avaliacoes_juiz ALTER COLUMN id_avaliacao SET DEFAULT nextval('public.avaliacoes_juiz_id_avaliacao_seq'::regclass);
 
+--
+-- Name: prompt_juizes id_prompt_juiz; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.prompt_juizes ALTER COLUMN id_prompt_juiz SET DEFAULT nextval('public.prompt_juizes_id_prompt_juiz_seq'::regclass);
+
 
 --
 -- Name: datasets id_dataset; Type: DEFAULT; Schema: public; Owner: -
@@ -262,7 +306,14 @@ ALTER TABLE ONLY public.respostas_atividade_1 ALTER COLUMN id_resposta SET DEFAU
 -- Data for Name: avaliacoes_juiz; Type: TABLE DATA; Schema: public; Owner: -
 --
 
-COPY public.avaliacoes_juiz (id_avaliacao, id_resposta_ativa1, id_modelo_juiz, nota_atribuida, prompt_juiz, rubrica_utilizada, chain_of_thought, data_avaliacao) FROM stdin;
+COPY public.avaliacoes_juiz (id_avaliacao, id_resposta_ativa1, id_modelo_juiz, id_prompt_juiz, nota_atribuida, chain_of_thought, papel_juiz, rodada_julgamento, motivo_acionamento, status_avaliacao, data_avaliacao) FROM stdin;
+\.
+
+--
+-- Data for Name: prompt_juizes; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.prompt_juizes (id_prompt_juiz, id_dataset, versao, ds_prompt, ds_persona, ds_contexto, ds_rubrica, ds_saida, created_at, created_by, ativo) FROM stdin;
 \.
 
 
@@ -5216,6 +5267,12 @@ SELECT pg_catalog.setval('public.perguntas_id_pergunta_seq', 1476, true);
 
 SELECT pg_catalog.setval('public.respostas_atividade_1_id_resposta_seq', 2828, true);
 
+--
+-- Name: prompt_juizes_id_prompt_juiz_seq; Type: SEQUENCE SET; Schema: public; Owner: -
+--
+
+SELECT pg_catalog.setval('public.prompt_juizes_id_prompt_juiz_seq', 1, false);
+
 
 --
 -- Name: avaliacoes_juiz avaliacoes_juiz_pkey; Type: CONSTRAINT; Schema: public; Owner: -
@@ -5223,6 +5280,20 @@ SELECT pg_catalog.setval('public.respostas_atividade_1_id_resposta_seq', 2828, t
 
 ALTER TABLE ONLY public.avaliacoes_juiz
     ADD CONSTRAINT avaliacoes_juiz_pkey PRIMARY KEY (id_avaliacao);
+
+--
+-- Name: prompt_juizes prompt_juizes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.prompt_juizes
+    ADD CONSTRAINT prompt_juizes_pkey PRIMARY KEY (id_prompt_juiz);
+
+--
+-- Name: prompt_juizes prompt_juizes_id_dataset_versao_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.prompt_juizes
+    ADD CONSTRAINT prompt_juizes_id_dataset_versao_key UNIQUE (id_dataset, versao);
 
 
 --
@@ -5270,6 +5341,12 @@ CREATE INDEX idx_avaliacoes_juiz ON public.avaliacoes_juiz USING btree (id_model
 
 CREATE INDEX idx_avaliacoes_resposta ON public.avaliacoes_juiz USING btree (id_resposta_ativa1);
 
+--
+-- Name: idx_prompt_juizes_active_per_dataset; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_prompt_juizes_active_per_dataset ON public.prompt_juizes USING btree (id_dataset) WHERE ativo;
+
 
 --
 -- Name: idx_perguntas_dataset; Type: INDEX; Schema: public; Owner: -
@@ -5299,6 +5376,13 @@ CREATE INDEX idx_respostas_pergunta ON public.respostas_atividade_1 USING btree 
 ALTER TABLE ONLY public.avaliacoes_juiz
     ADD CONSTRAINT avaliacoes_juiz_id_modelo_juiz_fkey FOREIGN KEY (id_modelo_juiz) REFERENCES public.modelos(id_modelo);
 
+--
+-- Name: avaliacoes_juiz avaliacoes_juiz_id_prompt_juiz_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.avaliacoes_juiz
+    ADD CONSTRAINT avaliacoes_juiz_id_prompt_juiz_fkey FOREIGN KEY (id_prompt_juiz) REFERENCES public.prompt_juizes(id_prompt_juiz);
+
 
 --
 -- Name: avaliacoes_juiz avaliacoes_juiz_id_resposta_ativa1_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
@@ -5306,6 +5390,13 @@ ALTER TABLE ONLY public.avaliacoes_juiz
 
 ALTER TABLE ONLY public.avaliacoes_juiz
     ADD CONSTRAINT avaliacoes_juiz_id_resposta_ativa1_fkey FOREIGN KEY (id_resposta_ativa1) REFERENCES public.respostas_atividade_1(id_resposta);
+
+--
+-- Name: prompt_juizes prompt_juizes_id_dataset_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.prompt_juizes
+    ADD CONSTRAINT prompt_juizes_id_dataset_fkey FOREIGN KEY (id_dataset) REFERENCES public.datasets(id_dataset);
 
 
 --
@@ -5337,4 +5428,3 @@ ALTER TABLE ONLY public.respostas_atividade_1
 --
 
 \unrestrict n6M1CduMqFib7WUlnLMD85ltBh3SQKuUsOvgRRp10AX7lRNBlvHwyV4DXG2AvhH
-

@@ -324,7 +324,10 @@ class JudgePipeline:
         trigger_reason: str,
         terminal_progress: bool = True,
     ) -> EvaluationRecord:
-        prompt = build_judge_prompt(answer)
+        prompt_template = self.repository.get_prompt_template(
+            dataset_name=answer.dataset_name,
+        )
+        prompt = build_judge_prompt(answer, judge_model=judge_model, template=prompt_template)
         detail = (
             f"answer_id={answer.answer_id} question_id={answer.question_id} "
             f"model={judge_model.provider_model} role={stored_role} trigger={trigger_reason}"
@@ -417,13 +420,12 @@ class JudgePipeline:
         return EvaluationRecord(
             answer_id=answer.answer_id,
             judge_model=judge_model,
+            prompt_id=prompt_template.prompt_id if prompt_template is not None else None,
             stored_role=stored_role,
             panel_mode=config.panel_mode,
             trigger_reason=trigger_reason,
             score=parsed.score,
             rationale=parsed.rationale,
-            prompt=prompt,
-            rubric=answer.reference_answer,
             latency_ms=raw_response.latency_ms,
             raw_response=raw_response,
         )

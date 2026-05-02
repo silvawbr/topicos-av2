@@ -312,13 +312,12 @@ def _record_for_existing_score(
     return EvaluationRecord(
         answer_id=answer_id,
         judge_model=judge_model,
+        prompt_id=None,
         stored_role=stored_role,
         panel_mode="2plus1",
         trigger_reason="primary_panel",
         score=score,
         rationale="existing",
-        prompt="prompt",
-        rubric="rubric",
         latency_ms=1,
     )
 

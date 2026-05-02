@@ -151,7 +151,10 @@ A Web UI:
 - valida configuração por dry-run;
 - inicia execução real sem chamar a CLI por subprocesso;
 - mostra progresso percentual do batch;
-- exibe o comando CLI equivalente e o caminho do audit log.
+- exibe o comando CLI equivalente e o caminho do audit log;
+- inclui a aba `Prompt Juizes` para manter prompt, persona, contexto, rubrica e saida por `dataset`.
+
+Na aba `Prompt Juizes`, cada salvamento cria uma nova versao imutavel em `prompt_juizes`. A avaliacao persistida em `avaliacoes_juiz` passa a apontar para `id_prompt_juiz`, preservando qual versao exata do prompt foi usada em cada execucao. A propria UI mostra o preview com uma questao de exemplo e a lista de versoes disponiveis.
 
 Por segurança, o serviço Web é publicado apenas em `127.0.0.1:${WEB_PORT:-8000}`. Se o endpoint do juiz roda no host da máquina e a Web roda em container, `localhost` dentro do container aponta para o próprio container; em macOS/Windows, use `host.docker.internal` quando precisar acessar LM Studio, llama.cpp, Ollama proxy ou serviço similar no host.
 
@@ -518,3 +521,5 @@ make db-down
 - automação via notebook.
 
 `atividade2.ipynb` permanece como artefato separado e não é necessário para subir ou validar o ambiente local.
+
+

@@ -96,6 +96,38 @@ class CandidateAnswerContext:
 
 
 @dataclass(frozen=True)
+class JudgePromptTemplate:
+    """Custom prompt fields resolved per dataset."""
+
+    prompt_id: int | None
+    dataset_name: str
+    version: int | None
+    created_by: str | None
+    prompt_text: str
+    persona: str
+    context_text: str
+    rubric_text: str
+    output_text: str
+
+
+@dataclass(frozen=True)
+class JudgePromptConfigRecord:
+    """Persisted prompt configuration record exposed to the UI service."""
+
+    prompt_id: int
+    dataset: str
+    version: int
+    created_by: str | None
+    active: bool
+    prompt: str
+    persona: str
+    context: str
+    rubric: str
+    output: str
+    created_at: str | None
+
+
+@dataclass(frozen=True)
 class JudgeRawResponse:
     """Raw remote judge response plus provider metadata."""
 
@@ -126,13 +158,12 @@ class EvaluationRecord:
 
     answer_id: int
     judge_model: ModelSpec
+    prompt_id: int | None
     stored_role: StoredJudgeRole
     panel_mode: PanelMode
     trigger_reason: str
     score: int
     rationale: str
-    prompt: str
-    rubric: str
     latency_ms: int
     raw_response: JudgeRawResponse | None = None
 
