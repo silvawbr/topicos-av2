@@ -156,6 +156,17 @@ A Web UI:
 
 Na aba `Prompt Juizes`, cada salvamento cria uma nova versao imutavel em `prompt_juizes`. A avaliacao persistida em `avaliacoes_juiz` passa a apontar para `id_prompt_juiz`, preservando qual versao exata do prompt foi usada em cada execucao. A propria UI mostra o preview com uma questao de exemplo e a lista de versoes disponiveis.
 
+#### Atualizando o prompt J1 (discursiva/peca)
+
+Mudancas no prompt default do codigo afetam apenas bases novas/restores. Para aplicar o prompt J1 recalibrado em um banco ja existente:
+
+1. Suba a Web UI: `make web-up`
+2. Abra `http://127.0.0.1:8000` e acesse a aba `Prompt Juizes`.
+3. Selecione o dataset `J1` (alias de `OAB_Bench`), ajuste `Prompt/Persona/Contexto/Rubrica/Saida` e clique em `Salvar`.
+4. Confirme que a nova versao ficou `ativa` e que o preview renderiza corretamente.
+
+Esse fluxo cria uma nova versao no Postgres sem migrations e sem alterar automaticamente versoes ativas.
+
 Por segurança, o serviço Web é publicado apenas em `127.0.0.1:${WEB_PORT:-8000}`. Se o endpoint do juiz roda no host da máquina e a Web roda em container, `localhost` dentro do container aponta para o próprio container; em macOS/Windows, use `host.docker.internal` quando precisar acessar LM Studio, llama.cpp, Ollama proxy ou serviço similar no host.
 
 Comandos úteis:
@@ -521,5 +532,4 @@ make db-down
 - automação via notebook.
 
 `atividade2.ipynb` permanece como artefato separado e não é necessário para subir ou validar o ambiente local.
-
 

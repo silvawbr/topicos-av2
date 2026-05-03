@@ -114,7 +114,10 @@ class RunJudgeService:
 
     def describe_config(self) -> dict[str, Any]:
         """Return secret-safe defaults and effective configuration for the Web UI."""
-        settings = self._settings_loader()
+        try:
+            settings = self._settings_loader()
+        except ConfigurationError as error:
+            return _config_error_description(str(error))
         base = {
             "defaults": {
                 "panel_mode": settings.judge_panel_mode,
@@ -763,6 +766,20 @@ def _endpoint_overview(settings: JudgeSettings) -> dict[str, dict[str, Any]]:
             ),
             "has_api_key": bool(settings.remote_judge_endpoints.get("ARBITER") or settings.remote_judge_api_key),
         },
+    }
+
+
+def _config_error_description(message: str) -> dict[str, Any]:
+    return {
+        "defaults": {},
+        "supported": {
+            "panel_modes": ["single", "primary_only", "2plus1"],
+            "datasets": ["J1", "J2"],
+            "judge_execution_strategies": ["sequential", "parallel", "adaptive"],
+        },
+        "endpoints": {},
+        "presets": [],
+        "configuration_error": message,
     }
 
 

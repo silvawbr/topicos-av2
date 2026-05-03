@@ -132,6 +132,17 @@ def test_invalid_configuration_is_reported_in_config_description() -> None:
     assert "REMOTE_JUDGE_BASE_URL is required" in config["configuration_error"]
 
 
+def test_settings_loader_error_is_reported_in_config_description() -> None:
+    env = dict(BASE_ENV)
+    env["APP_ENV"] = "local"
+    service = RunJudgeService(settings_loader=lambda: load_settings(dotenv_path=None, env=env))
+
+    config = service.describe_config()
+
+    assert "configuration_error" in config
+    assert "APP_ENV must be one of: dev, prod, test" in config["configuration_error"]
+
+
 def test_resolve_applies_web_endpoint_and_advanced_overrides() -> None:
     service = RunJudgeService(settings_loader=lambda: load_settings(dotenv_path=None, env=BASE_ENV))
 
