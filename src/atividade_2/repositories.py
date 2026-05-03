@@ -105,11 +105,16 @@ def _default_prompt_config(dataset_name: str) -> dict[str, str]:
         ),
         "rubric": (
             "Rubrica de avaliacao (1 a 5):\n"
-            "- Nota 1: Resposta incorreta, cita leis inexistentes ou confunde institutos basicos.\n"
-            "- Nota 2: Conclusao correta, mas a fundamentacao e vaga ou cita artigos de lei errados.\n"
-            "- Nota 3: Resposta correta e bem fundamentada, mas falta clareza ou omite detalhes importantes do gabarito.\n"
-            "- Nota 4: Resposta excelente, alinhada ao gabarito, com fundamentacao legal precisa.\n"
-            "- Nota 5: Resposta excepcional, fundamentada, cita jurisprudencia relevante (STF/STJ) e demonstra raciocinio juridico mestre.\n\n"
+            "- Nota 1: Resposta substancialmente incorreta, com erro no instituto juridico central, instrumento processual inadequado, uso de normas inexistentes ou inaplicaveis, ou confusao grave dos fundamentos do caso.\n"
+            "- Nota 2: Resposta parcialmente correta, com algum reconhecimento da tese ou pretensao adequada, mas com fundamentacao vaga, incompleta, imprecisa ou apoiada em dispositivos legais errados ou pouco pertinentes.\n"
+            "- Nota 3: Resposta juridicamente adequada no nucleo da solucao, com fundamentacao suficiente, mas que apresenta omissoes relevantes, baixa clareza, desenvolvimento incompleto ou perda de pontos importantes da rubrica/gabarito.\n"
+            "- Nota 4: Resposta muito boa, juridicamente correta e bem fundamentada, cobrindo a maior parte dos pontos essenciais da rubrica/gabarito, com fundamentacao legal precisa e apenas omissoes ou imprecisoes nao centrais.\n"
+            "- Nota 5: Resposta excepcional, juridicamente correta, bem fundamentada e materialmente alinhada aos pontos essenciais da rubrica/gabarito. Admite fundamentacao equivalente ou solucao alternativa juridicamente defensavel quando compativel com o caso e com o Direito brasileiro, podendo divergir em aspectos nao centrais sem prejuizo da tese. Nao inventa normas, fatos, jurisprudencia ou fundamentos e nao omite elemento central da solucao esperada.\n\n"
+            "Diretrizes anti-alucinacao e auditoria:\n"
+            "- Nao invente leis, artigos, sumulas, precedentes ou numeros. Norma inexistente deve pesar negativamente.\n"
+            "- Nao exija citacao legal/jurisprudencial para dar nota alta; avalie alinhamento ao gabarito e precisao.\n"
+            "- Para PECA PRATICO-PROFISSIONAL, a nota 5 exige acerto do instrumento processual cabivel, estrutura minima da peca, identificacao adequada das partes ou autoridade coatora quando aplicavel, fundamentos juridicos centrais, pedido liminar quando exigido, pedidos finais e ausencia de fundamentos inventados. Solucoes alternativas so devem ser aceitas se forem processualmente cabiveis e materialmente compativeis com a pretensao do enunciado.\n"
+            "- Se o enunciado indicar PECA PRATICO-PROFISSIONAL, penalize fortemente peca/instrumento errado e erros juridicos substantivos (cabimento, competencia, prazo, pedido incompativel).\n\n"
             "Instrucao: Analise a resposta comparando-a com o gabarito. Ignore o tamanho do texto; foque na precisao do Direito brasileiro.\n\n"
             "Versoes:\n"
             "- prompt_version: {prompt_version}\n"
@@ -120,7 +125,7 @@ def _default_prompt_config(dataset_name: str) -> dict[str, str]:
             "Nao use markdown.\n"
             "Nao use bloco ```json.\n"
             "Nao escreva texto antes ou depois do JSON.\n\n"
-            "Formato obrigatorio (mapeie o seu RACIOCINIO para o campo rationale):\n"
+            "Formato obrigatorio (justificativa auditavel, sem cadeia de pensamento privada):\n"
             "{\n"
             '  "score": 4,\n'
             '  "rationale": "Justificativa curta e auditavel.",\n'

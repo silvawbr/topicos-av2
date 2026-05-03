@@ -288,8 +288,8 @@ def test_dashboard_reports_critical_error_analysis_categories_and_table() -> Non
         _row(evaluation_id=4, answer_id=4, dataset="J2", candidate_answer="B", reference_answer="B", score=3, rationale="Correto."),
         _row(evaluation_id=5, answer_id=5, dataset="J2", candidate_answer="B", reference_answer="B", score=None, status="failed", rationale="invalid JSON"),
         _row(evaluation_id=6, answer_id=6, dataset="J2", candidate_answer="B", reference_answer="B", score=None, status="HTTP 504 timeout"),
-        _row(evaluation_id=7, answer_id=7, dataset="J2", candidate_answer="B", reference_answer="B", score=5, judge_model="juiz-a"),
-        _row(evaluation_id=8, answer_id=7, dataset="J2", candidate_answer="B", reference_answer="B", score=2, judge_model="juiz-b"),
+        _row(evaluation_id=7, answer_id=7, dataset="J2", candidate_answer="B", reference_answer="B", score=5, judge_model="juiz-a", role="principal"),
+        _row(evaluation_id=8, answer_id=7, dataset="J2", candidate_answer="B", reference_answer="B", score=2, judge_model="juiz-b", role="controle"),
     ]
 
     payload = build_dashboard_payload(rows, expected_answers=7, filters=DashboardFilters(dataset="J2"))
@@ -314,4 +314,59 @@ def test_dashboard_reports_critical_error_analysis_categories_and_table() -> Non
         "short_justification": "referencia 1, juiz 5",
         "log_url": None,
     } in table
-    assert any(row["error_type"] == "Divergencia entre juizes" and "juiz-a=5" in row["short_justification"] for row in table)
+    assert any(
+        row["error_type"] == "Divergencia entre juizes" and "juiz-a(principal)=5" in row["short_justification"]
+        for row in table
+    )
+
+
+def test_dashboard_reports_minor_disagreements_as_separate_telemetry() -> None:
+    rows = [
+        _row(
+            evaluation_id=1,
+            answer_id=1,
+            dataset="J1",
+            candidate_answer="texto",
+            reference_answer="rubrica",
+            score=4,
+            judge_model="juiz-a",
+            role="principal",
+        ),
+        _row(
+            evaluation_id=2,
+            answer_id=1,
+            dataset="J1",
+            candidate_answer="texto",
+            reference_answer="rubrica",
+            score=3,
+            judge_model="juiz-b",
+            role="controle",
+        ),
+        _row(
+            evaluation_id=3,
+            answer_id=2,
+            dataset="J1",
+            candidate_answer="texto",
+            reference_answer="rubrica",
+            score=4,
+            judge_model="juiz-a",
+            role="principal",
+        ),
+        _row(
+            evaluation_id=4,
+            answer_id=2,
+            dataset="J1",
+            candidate_answer="texto",
+            reference_answer="rubrica",
+            score=4,
+            judge_model="juiz-b",
+            role="controle",
+        ),
+    ]
+
+    payload = build_dashboard_payload(rows, expected_answers=2, filters=DashboardFilters(dataset="J1"))
+
+    assert payload["cards"]["minor_disagreements"] == 1
+    assert payload["cards"]["audit_divergences"] == 0
+    assert payload["tables"]["minor_disagreement_cases"][0]["answer_id"] == 1
+    assert payload["tables"]["minor_disagreement_cases"][0]["reason"] == "delta 1 (leve)"

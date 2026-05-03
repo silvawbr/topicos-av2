@@ -1584,7 +1584,11 @@ _INDEX_HTML = """
       renderBarChart("dashboard-divergences", data.charts?.divergences || [], {scaleMax: 1, tone: "bad"});
       renderBarChart("dashboard-critical-chart", data.charts?.critical_cases || [], {scaleMax: 1, tone: "bad"});
       setText("dashboard-methodology", `${data.methodology?.primary_spearman || ""} ${data.methodology?.judge_arbiter || ""}`.trim());
-      renderDashboardCases([...(data.tables?.critical_cases || []), ...(data.tables?.divergence_cases || [])]);
+      renderDashboardCases([
+        ...(data.tables?.critical_cases || []),
+        ...(data.tables?.minor_disagreement_cases || []),
+        ...(data.tables?.divergence_cases || []),
+      ]);
     }
 
     function populateSelect(id, values, selected) {
@@ -1656,6 +1660,7 @@ _INDEX_HTML = """
         ["Spearman juiz x referencia", formatSpearman(cards.spearman_reference)],
         ["Consistencia juiz x arbitro", formatSpearman(cards.judge_arbiter_consistency)],
         ["Falhas criticas detectadas", cards.critical_failures],
+        ["Divergencias leves (delta=1)", cards.minor_disagreements],
         ["Divergencias para auditoria", cards.audit_divergences]
       ];
       for (const metric of metrics) {

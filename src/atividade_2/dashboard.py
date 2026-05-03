@@ -93,6 +93,7 @@ def build_dashboard_payload(
     primary_spearman = _primary_spearman(scored_rows, filters.dataset)
     consistency_spearman = _judge_arbiter_spearman(scored_rows)
     critical_cases = _critical_cases(rows)
+    minor_disagreement_cases = _minor_disagreement_cases(successful_rows)
     divergence_cases = _divergence_cases(successful_rows)
     ordinal_confusion = _ordinal_confusion_matrix(scored_rows, filters.dataset)
     critical_error_analysis = _critical_error_analysis(rows, divergence_cases, filters.dataset)
@@ -109,6 +110,7 @@ def build_dashboard_payload(
         "spearman_reference": primary_spearman,
         "judge_arbiter_consistency": consistency_spearman,
         "critical_failures": len(critical_cases),
+        "minor_disagreements": len(minor_disagreement_cases),
         "audit_divergences": len(divergence_cases),
     }
     return {
@@ -130,6 +132,7 @@ def build_dashboard_payload(
         },
         "tables": {
             "critical_cases": critical_cases[:25],
+            "minor_disagreement_cases": minor_disagreement_cases[:25],
             "divergence_cases": divergence_cases[:25],
             "critical_error_analysis": critical_error_analysis["cases"][:40],
         },
@@ -658,22 +661,107 @@ def _critical_cases(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _divergence_cases(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cases: list[dict[str, Any]] = []
+    for answer_rows in _grouped_answer_rows(rows).values():
+        disagreement = _primary_disagreement(answer_rows)
+        if disagreement is None or disagreement["primary_delta"] < 2:
+            continue
+        base = disagreement["base_row"]
+        case = _case_row(base, reason=f"delta {disagreement['primary_delta']}")
+        case["primary_delta"] = disagreement["primary_delta"]
+        case["scores"] = disagreement["scores"]
+        case["arbitration_triggered"] = disagreement["arbitration_triggered"]
+        case["arbitration_reason"] = disagreement["arbitration_reason"]
+        cases.append(case)
+    return sorted(cases, key=lambda row: (-row["primary_delta"], row["answer_id"]))
+
+
+def _minor_disagreement_cases(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cases: list[dict[str, Any]] = []
+    for answer_rows in _grouped_answer_rows(rows).values():
+        disagreement = _primary_disagreement(answer_rows)
+        if disagreement is None or disagreement["primary_delta"] != 1:
+            continue
+        base = disagreement["base_row"]
+        case = _case_row(base, reason="delta 1 (leve)")
+        case["primary_delta"] = disagreement["primary_delta"]
+        case["scores"] = disagreement["scores"]
+        case["arbitration_triggered"] = disagreement["arbitration_triggered"]
+        case["arbitration_reason"] = disagreement["arbitration_reason"]
+        cases.append(case)
+    return sorted(cases, key=lambda row: (row["answer_id"], row["evaluation_id"]))
+
+
+def _grouped_answer_rows(rows: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
     grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        grouped[row["answer_id"]].append(row)
-    cases = []
-    for answer_id, answer_rows in grouped.items():
-        scores = [row["score"] for row in answer_rows if row["score"] is not None]
-        if len(scores) < 2:
+        grouped[int(row["answer_id"])].append(row)
+    return grouped
+
+
+def _primary_disagreement(answer_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    principal_row: dict[str, Any] | None = None
+    controle_row: dict[str, Any] | None = None
+    for row in answer_rows:
+        if row.get("status") != "success":
             continue
-        delta = max(scores) - min(scores)
-        if delta >= 2:
-            base = answer_rows[0]
-            case = _case_row(base, reason=f"delta {delta}")
-            case["delta"] = delta
-            case["scores"] = ", ".join(f"{row['judge_model']}={row['score']}" for row in answer_rows)
-            cases.append(case)
-    return sorted(cases, key=lambda row: (-row["delta"], row["answer_id"]))
+        score = row.get("score")
+        if score is None:
+            continue
+        role = row.get("role")
+        if role == "principal" and principal_row is None:
+            principal_row = row
+        elif role == "controle" and controle_row is None:
+            controle_row = row
+        if principal_row is not None and controle_row is not None:
+            break
+    if principal_row is None or controle_row is None:
+        return None
+
+    primary_delta = abs(int(principal_row["score"]) - int(controle_row["score"]))
+    arbitration_triggered = False
+    arbitration_reason = None
+    for row in answer_rows:
+        if row.get("status") != "success":
+            continue
+        if row.get("role") != "arbitro" or row.get("score") is None:
+            continue
+        arbitration_triggered = True
+        arbitration_reason = _trigger_suffix(row.get("trigger_reason"))
+        break
+
+    base_row = principal_row
+    scores = []
+    scores.append(f"{principal_row['judge_model']}(principal)={principal_row['score']}")
+    scores.append(f"{controle_row['judge_model']}(controle)={controle_row['score']}")
+    if arbitration_triggered:
+        arbiter = next(
+            (
+                row
+                for row in answer_rows
+                if row.get("status") == "success" and row.get("role") == "arbitro" and row.get("score") is not None
+            ),
+            None,
+        )
+        if arbiter is not None:
+            scores.append(f"{arbiter['judge_model']}(arbitro)={arbiter['score']}")
+
+    return {
+        "base_row": base_row,
+        "primary_delta": primary_delta,
+        "scores": ", ".join(scores),
+        "arbitration_triggered": arbitration_triggered,
+        "arbitration_reason": arbitration_reason,
+    }
+
+
+def _trigger_suffix(trigger_reason: str | None) -> str | None:
+    if not trigger_reason:
+        return None
+    text = str(trigger_reason)
+    if ":" in text:
+        return text.split(":", 1)[1] or None
+    return text
 
 
 def _divergence_chart(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:

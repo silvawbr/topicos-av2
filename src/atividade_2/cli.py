@@ -8,6 +8,8 @@ from collections.abc import Sequence
 from .config import ConfigurationError
 from .judge_clients.remote_http import RemoteJudgeError
 from .parser import JudgeParseError
+from .config import load_settings
+from .db import connect
 from .run_judge_service import ResolvedRun, RunJudgeRequest, RunJudgeService, format_execution_summary
 
 
@@ -74,6 +76,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable animated terminal dots for long-running audit steps.",
     )
     run_judge.set_defaults(handler=run_judge_command)
+
+    save_prompt = subparsers.add_parser(
+        "save-default-prompt",
+        help="Create and activate a new prompt_juizes version from the repository defaults.",
+    )
+    save_prompt.add_argument(
+        "--dataset",
+        choices=["J1", "J2", "OAB_Bench", "OAB_Exames"],
+        default="J1",
+        help="Prompt dataset to version. J1 maps to OAB_Bench; J2 maps to OAB_Exames.",
+    )
+    save_prompt.add_argument(
+        "--changed-by",
+        required=True,
+        help="Value stored as created_by for the new prompt version.",
+    )
+    save_prompt.set_defaults(handler=save_default_prompt_command)
     return parser
 
 
@@ -115,6 +134,39 @@ def run_judge_command(args: argparse.Namespace) -> int:
         print(f"Executed evaluations: {result.summary.executed_evaluations}")
         print(f"Skipped existing evaluations: {result.summary.skipped_evaluations}")
         print(f"Arbiter evaluations: {result.summary.arbiter_evaluations}")
+    return 0
+
+
+def save_default_prompt_command(args: argparse.Namespace) -> int:
+    """Persist a new prompt_juizes version using repository defaults."""
+    from .judge_prompt_configs import resolve_prompt_dataset_name
+    from .repositories import JudgeRepository, _default_prompt_config
+
+    dataset_name = resolve_prompt_dataset_name(args.dataset)
+    defaults = _default_prompt_config(dataset_name)
+
+    settings = load_settings()
+    connection = connect(settings.database_url)
+    try:
+        repository = JudgeRepository(connection)
+        repository.ensure_schema()
+        record = repository.create_prompt_config_version(
+            dataset=dataset_name,
+            prompt=defaults["prompt"],
+            persona=defaults["persona"],
+            context=defaults["context"],
+            rubric=defaults["rubric"],
+            output=defaults["output"],
+            changed_by=str(args.changed_by).strip(),
+        )
+    finally:
+        connection.close()
+
+    print("Prompt version saved and activated:")
+    print(f"- dataset: {record.dataset}")
+    print(f"- prompt_id: {record.prompt_id}")
+    print(f"- version: {record.version}")
+    print(f"- created_by: {record.created_by}")
     return 0
 
 
