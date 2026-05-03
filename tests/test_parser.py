@@ -51,6 +51,23 @@ def test_parser_extracts_first_valid_json_object_after_incidental_braces() -> No
     assert parsed.rationale == "Ok."
 
 
+def test_parser_recovers_unescaped_quotes_inside_text_fields() -> None:
+    parsed = parse_judge_output(
+        '{ "score": 1, '
+        '"rationale": "Inventa artigos inexistentes como \'artigo nº 186 ("Empujonar")\' e \'Decreto X\'.", '
+        '"legal_accuracy": "Baixa por citar ("norma") inexistente.", '
+        '"hallucination_risk": "alto", '
+        '"rubric_alignment": "Não atende ao gabarito.", '
+        '"requires_human_review": false }'
+    )
+
+    assert parsed.score == 1
+    assert parsed.rationale == (
+        "Inventa artigos inexistentes como 'artigo nº 186 (\"Empujonar\")' e 'Decreto X'."
+    )
+    assert parsed.legal_accuracy == 'Baixa por citar ("norma") inexistente.'
+
+
 def test_parser_rejects_out_of_range_score() -> None:
     with pytest.raises(JudgeParseError, match="between 1 and 5"):
         parse_judge_output('{"score": 6, "rationale": "fora da escala"}')
