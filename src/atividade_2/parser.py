@@ -67,6 +67,8 @@ def _load_json_object(text: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         parsed = _load_first_embedded_json_object(candidate)
         if parsed is None:
+            parsed = _load_json_with_recovered_text_quotes(candidate)
+        if parsed is None:
             raise JudgeParseError(
                 "Judge response does not contain a JSON object. "
                 f"Preview: {_sanitized_preview(candidate)}"
@@ -91,9 +93,60 @@ def _load_first_embedded_json_object(text: str) -> dict[str, Any] | None:
         try:
             parsed = json.loads(json_object)
         except json.JSONDecodeError:
-            continue
+            parsed = _load_json_with_recovered_text_quotes(json_object)
+            if parsed is None:
+                continue
         if isinstance(parsed, dict):
             return parsed
+    return None
+
+
+def _load_json_with_recovered_text_quotes(text: str) -> dict[str, Any] | None:
+    recovered = _escape_unescaped_string_quotes(text)
+    if recovered == text:
+        return None
+    try:
+        parsed = json.loads(recovered)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _escape_unescaped_string_quotes(text: str) -> str:
+    pieces: list[str] = []
+    in_string = False
+    escaped = False
+    for index, character in enumerate(text):
+        if escaped:
+            pieces.append(character)
+            escaped = False
+            continue
+        if character == "\\" and in_string:
+            pieces.append(character)
+            escaped = True
+            continue
+        if character != '"':
+            pieces.append(character)
+            continue
+
+        if not in_string:
+            pieces.append(character)
+            in_string = True
+            continue
+
+        next_character = _next_non_space(text, index + 1)
+        if next_character in {":", ",", "}", "]", None}:
+            pieces.append(character)
+            in_string = False
+        else:
+            pieces.append('\\"')
+    return "".join(pieces)
+
+
+def _next_non_space(text: str, start: int) -> str | None:
+    for character in text[start:]:
+        if not character.isspace():
+            return character
     return None
 
 
