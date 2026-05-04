@@ -128,6 +128,39 @@ class JudgePromptConfigRecord:
 
 
 @dataclass(frozen=True)
+class MetaEvaluationRecord:
+    """Persisted human meta-evaluation for a judge evaluation."""
+
+    meta_evaluation_id: int
+    evaluation_id: int
+    evaluator_name: str
+    score: int
+    rationale: str
+    created_at: str | None
+
+
+@dataclass(frozen=True)
+class MetaEvaluationSubject:
+    """Judge evaluation context shown to the human meta-evaluator."""
+
+    evaluation_id: int
+    dataset: str
+    question_id: int
+    answer_id: int
+    candidate_model: str
+    judge_model: str
+    judge_score: int
+    judge_rationale: str
+    judge_chain_of_thought: str
+    question_text: str
+    reference_answer: str
+    candidate_answer: str
+    evaluated_at: str | None
+    prompt_version: int | None
+    prompt_created_by: str | None
+
+
+@dataclass(frozen=True)
 class JudgeRawResponse:
     """Raw remote judge response plus provider metadata."""
 

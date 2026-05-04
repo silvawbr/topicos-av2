@@ -12,6 +12,8 @@ from .contracts import (
     EvaluationRecord,
     JudgePromptConfigRecord,
     JudgePromptTemplate,
+    MetaEvaluationRecord,
+    MetaEvaluationSubject,
     ModelSpec,
     StoredJudgeRole,
 )
@@ -505,6 +507,20 @@ class JudgeRepository:
         if int(cursor.fetchone()[0]) == 0:
             cursor.execute("ALTER TABLE avaliacoes_juiz ALTER COLUMN id_prompt_juiz SET NOT NULL;")
 
+    def _ensure_meta_evaluation_schema(self, cursor: Any) -> None:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS meta_avaliacoes (
+                id_meta_avaliacao SERIAL PRIMARY KEY,
+                id_avaliacao INTEGER NOT NULL REFERENCES avaliacoes_juiz(id_avaliacao) ON DELETE CASCADE,
+                nm_avaliador VARCHAR(120) NOT NULL,
+                vl_nota INTEGER NOT NULL CHECK (vl_nota BETWEEN 1 AND 5),
+                ds_justificativa TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+
     def ensure_schema(self) -> None:
         """Add optional multi-judge metadata columns when the restored schema lacks them."""
         with self.connection:
@@ -518,6 +534,7 @@ class JudgeRepository:
                 )
                 self._ensure_prompt_schema(cursor)
                 self._ensure_evaluation_prompt_fk(cursor)
+                self._ensure_meta_evaluation_schema(cursor)
 
     def select_candidate_answers(self, *, dataset: str, limit: int | None) -> list[CandidateAnswerContext]:
         """Select AV1 answers with question/reference context."""
@@ -1094,8 +1111,236 @@ class JudgeRepository:
             reference_answer=row[4],
             candidate_answer=row[5],
             candidate_model=row[6],
-            metadata=_normalize_metadata(row[7]),
+                metadata=_normalize_metadata(row[7]),
+            )
+
+    def list_meta_evaluation_targets(self, *, dataset: str = "J1") -> list[dict[str, Any]]:
+        dataset_name = _resolve_prompt_dataset_name(dataset)
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    a.id_avaliacao,
+                    p.id_pergunta,
+                    r.id_resposta,
+                    cm.nome_modelo,
+                    jm.nome_modelo,
+                    a.nota_atribuida,
+                    a.data_avaliacao,
+                    COUNT(ma.id_meta_avaliacao) AS meta_count
+                FROM avaliacoes_juiz a
+                JOIN respostas_atividade_1 r ON r.id_resposta = a.id_resposta_ativa1
+                JOIN perguntas p ON p.id_pergunta = r.id_pergunta
+                JOIN datasets d ON d.id_dataset = p.id_dataset
+                JOIN modelos cm ON cm.id_modelo = r.id_modelo
+                JOIN modelos jm ON jm.id_modelo = a.id_modelo_juiz
+                LEFT JOIN meta_avaliacoes ma ON ma.id_avaliacao = a.id_avaliacao
+                WHERE d.nome_dataset = %s
+                GROUP BY
+                    a.id_avaliacao,
+                    p.id_pergunta,
+                    r.id_resposta,
+                    cm.nome_modelo,
+                    jm.nome_modelo,
+                    a.nota_atribuida,
+                    a.data_avaliacao
+                ORDER BY a.data_avaliacao DESC, a.id_avaliacao DESC;
+                """,
+                (dataset_name,),
+            )
+            rows = cursor.fetchall()
+        return [
+            {
+                "value": str(int(row[0])),
+                "label": (
+                    f"{'[feito]' if int(row[7]) > 0 else '[pendente]'} "
+                    f"Aval. {int(row[0])} | Q{int(row[1])} | "
+                    f"{row[3]} x {row[4]} | nota {int(row[5])}"
+                ),
+                "evaluation_id": int(row[0]),
+                "question_id": int(row[1]),
+                "answer_id": int(row[2]),
+                "candidate_model": row[3],
+                "judge_model": row[4],
+                "judge_score": int(row[5]),
+                "evaluated_at": row[6].isoformat() if row[6] is not None else None,
+                "meta_completed": int(row[7]) > 0,
+                "meta_count": int(row[7]),
+            }
+            for row in rows
+        ]
+
+    def get_meta_evaluation_subject(self, *, evaluation_id: int, dataset: str = "J1") -> MetaEvaluationSubject | None:
+        dataset_name = _resolve_prompt_dataset_name(dataset)
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    a.id_avaliacao,
+                    d.nome_dataset,
+                    p.id_pergunta,
+                    r.id_resposta,
+                    cm.nome_modelo,
+                    jm.nome_modelo,
+                    a.nota_atribuida,
+                    a.chain_of_thought,
+                    p.enunciado,
+                    p.resposta_ouro,
+                    r.texto_resposta,
+                    a.data_avaliacao,
+                    pj.versao,
+                    pj.created_by
+                FROM avaliacoes_juiz a
+                JOIN respostas_atividade_1 r ON r.id_resposta = a.id_resposta_ativa1
+                JOIN perguntas p ON p.id_pergunta = r.id_pergunta
+                JOIN datasets d ON d.id_dataset = p.id_dataset
+                JOIN modelos cm ON cm.id_modelo = r.id_modelo
+                JOIN modelos jm ON jm.id_modelo = a.id_modelo_juiz
+                LEFT JOIN prompt_juizes pj ON pj.id_prompt_juiz = a.id_prompt_juiz
+                WHERE a.id_avaliacao = %s
+                  AND d.nome_dataset = %s
+                LIMIT 1;
+                """,
+                (evaluation_id, dataset_name),
+            )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return MetaEvaluationSubject(
+            evaluation_id=int(row[0]),
+            dataset=_dataset_label(row[1]),
+            question_id=int(row[2]),
+            answer_id=int(row[3]),
+            candidate_model=row[4],
+            judge_model=row[5],
+            judge_score=int(row[6]),
+            judge_rationale=row[7],
+            judge_chain_of_thought=row[7],
+            question_text=row[8],
+            reference_answer=row[9],
+            candidate_answer=row[10],
+            evaluated_at=row[11].isoformat() if row[11] is not None else None,
+            prompt_version=int(row[12]) if row[12] is not None else None,
+            prompt_created_by=row[13],
         )
+
+    def list_meta_evaluations(self, *, evaluation_id: int) -> list[MetaEvaluationRecord]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    id_meta_avaliacao,
+                    id_avaliacao,
+                    nm_avaliador,
+                    vl_nota,
+                    ds_justificativa,
+                    created_at
+                FROM meta_avaliacoes
+                WHERE id_avaliacao = %s
+                ORDER BY created_at DESC, id_meta_avaliacao DESC;
+                """,
+                (evaluation_id,),
+            )
+            rows = cursor.fetchall()
+        return [
+            MetaEvaluationRecord(
+                meta_evaluation_id=int(row[0]),
+                evaluation_id=int(row[1]),
+                evaluator_name=row[2],
+                score=int(row[3]),
+                rationale=row[4],
+                created_at=row[5].isoformat() if row[5] is not None else None,
+            )
+            for row in rows
+        ]
+
+    def create_meta_evaluation(
+        self,
+        *,
+        evaluation_id: int,
+        evaluator_name: str,
+        score: int,
+        rationale: str,
+    ) -> MetaEvaluationRecord:
+        with self.connection:
+            with self.connection.cursor() as cursor:
+                cursor.execute("SELECT 1 FROM avaliacoes_juiz WHERE id_avaliacao = %s;", (evaluation_id,))
+                if cursor.fetchone() is None:
+                    raise ValueError(f"Evaluation not found: {evaluation_id}.")
+                cursor.execute(
+                    """
+                    INSERT INTO meta_avaliacoes
+                        (
+                            id_avaliacao,
+                            nm_avaliador,
+                            vl_nota,
+                            ds_justificativa
+                        )
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id_meta_avaliacao, created_at;
+                    """,
+                    (evaluation_id, evaluator_name, score, rationale),
+                )
+                meta_id, created_at = cursor.fetchone()
+        return MetaEvaluationRecord(
+            meta_evaluation_id=int(meta_id),
+            evaluation_id=evaluation_id,
+            evaluator_name=evaluator_name,
+            score=score,
+            rationale=rationale,
+            created_at=created_at.isoformat() if created_at is not None else None,
+        )
+
+    def update_meta_evaluation(
+        self,
+        *,
+        meta_evaluation_id: int,
+        evaluation_id: int,
+        evaluator_name: str,
+        score: int,
+        rationale: str,
+    ) -> MetaEvaluationRecord:
+        with self.connection:
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE meta_avaliacoes
+                    SET
+                        nm_avaliador = %s,
+                        vl_nota = %s,
+                        ds_justificativa = %s
+                    WHERE id_meta_avaliacao = %s
+                      AND id_avaliacao = %s
+                    RETURNING created_at;
+                    """,
+                    (evaluator_name, score, rationale, meta_evaluation_id, evaluation_id),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ValueError(f"Meta-avaliacao not found: {meta_evaluation_id}.")
+                created_at = row[0]
+        return MetaEvaluationRecord(
+            meta_evaluation_id=meta_evaluation_id,
+            evaluation_id=evaluation_id,
+            evaluator_name=evaluator_name,
+            score=score,
+            rationale=rationale,
+            created_at=created_at.isoformat() if created_at is not None else None,
+        )
+
+    def delete_meta_evaluation(self, *, meta_evaluation_id: int, evaluation_id: int) -> None:
+        with self.connection:
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    DELETE FROM meta_avaliacoes
+                    WHERE id_meta_avaliacao = %s
+                      AND id_avaliacao = %s;
+                    """,
+                    (meta_evaluation_id, evaluation_id),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError(f"Meta-avaliacao not found: {meta_evaluation_id}.")
 
 
 def _round_for_role(role: StoredJudgeRole) -> str:

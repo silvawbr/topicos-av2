@@ -111,6 +111,26 @@ CREATE TABLE avaliacoes_juiz (
 );
 
 -- =========================
+-- 7. Human meta-evaluations
+-- =========================
+CREATE TABLE meta_avaliacoes (
+    id_meta_avaliacao SERIAL PRIMARY KEY,
+
+    id_avaliacao INTEGER NOT NULL
+        REFERENCES avaliacoes_juiz(id_avaliacao)
+        ON DELETE CASCADE,
+
+    nm_avaliador VARCHAR(120) NOT NULL,
+
+    vl_nota INTEGER NOT NULL
+        CHECK (vl_nota BETWEEN 1 AND 5),
+
+    ds_justificativa TEXT NOT NULL,
+
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =========================
 -- Indexes
 -- =========================
 
@@ -138,3 +158,7 @@ ON avaliacoes_juiz(id_resposta_ativa1);
 -- Evaluations by judge model.
 CREATE INDEX idx_avaliacoes_juiz
 ON avaliacoes_juiz(id_modelo_juiz);
+
+-- Meta-evaluations by evaluated row.
+CREATE INDEX idx_meta_avaliacoes_avaliacao
+ON meta_avaliacoes(id_avaliacao);
