@@ -1,0 +1,15 @@
+2026-06-05T02:26:20+00:00 | audit_log_started | path=logs/candidate-rag-20260605-022620.log
+2026-06-05T02:26:20+00:00 | START Loading configuration
+2026-06-05T02:26:20+00:00 | DONE Loading configuration | elapsed_ms=0
+2026-06-05T02:26:20+00:00 | execution_summary | Dataset: J1 | Candidate model: google/gemini-3.5-flash | Provider: remote_http | Batch size: 1 | Question id: - | Question range: 119-119
+2026-06-05T02:26:20+00:00 | START Connecting to local PostgreSQL | DATABASE_URL=<redacted>
+2026-06-05T02:26:20+00:00 | DONE Connecting to local PostgreSQL | DATABASE_URL=<redacted> elapsed_ms=37
+2026-06-05T02:26:20+00:00 | START Ensuring candidate metadata schema
+2026-06-05T02:26:20+00:00 | DONE Ensuring candidate metadata schema | elapsed_ms=30
+2026-06-05T02:26:20+00:00 | run_started | candidate_run_id=4 dataset=J1 model=google/gemini-3.5-flash provider=remote_http retrieval_run_id=1 prompt_id=1
+2026-06-05T02:26:20+00:00 | START Selecting candidate questions for J1 | dataset=J1 batch_size=1 question_id=None start=119 end=119
+2026-06-05T02:26:20+00:00 | DONE Selecting candidate questions for J1 | dataset=J1 batch_size=1 question_id=None start=119 end=119 elapsed_ms=2
+2026-06-05T02:26:20+00:00 | START Closing PostgreSQL connection
+2026-06-05T02:26:20+00:00 | DONE Closing PostgreSQL connection | elapsed_ms=0
+2026-06-05T02:26:20+00:00 | audit_log_failed | error=Candidate model google/gemini-3.5-flash has no runnable AV3 assignment for dataset=J1.
+2026-06-05T02:26:20+00:00 | audit_log_finished

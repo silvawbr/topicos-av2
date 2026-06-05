@@ -1,0 +1,20 @@
+2026-06-05T02:40:55+00:00 | audit_log_started | path=logs/candidate-rag-20260605-024055.log
+2026-06-05T02:40:55+00:00 | START Loading configuration
+2026-06-05T02:40:55+00:00 | DONE Loading configuration | elapsed_ms=0
+2026-06-05T02:40:55+00:00 | execution_summary | Dataset: J1 | Candidate model: google/gemma-2-2b-it | Provider: remote_http | Batch size: 1 | Question id: - | Question range: 71-71
+2026-06-05T02:40:55+00:00 | START Connecting to local PostgreSQL | DATABASE_URL=<redacted>
+2026-06-05T02:40:55+00:00 | DONE Connecting to local PostgreSQL | DATABASE_URL=<redacted> elapsed_ms=70
+2026-06-05T02:40:55+00:00 | START Ensuring candidate metadata schema
+2026-06-05T02:40:55+00:00 | DONE Ensuring candidate metadata schema | elapsed_ms=27
+2026-06-05T02:40:55+00:00 | run_started | candidate_run_id=8 dataset=J1 model=google/gemma-2-2b-it provider=remote_http retrieval_run_id=1 prompt_id=1
+2026-06-05T02:40:55+00:00 | START Selecting candidate questions for J1 | dataset=J1 batch_size=1 question_id=None start=71 end=71
+2026-06-05T02:40:55+00:00 | DONE Selecting candidate questions for J1 | dataset=J1 batch_size=1 question_id=None start=71 end=71 elapsed_ms=2
+2026-06-05T02:40:55+00:00 | question_started | candidate_run_id=8 question_id=71 sequence=71 dataset=J1
+2026-06-05T02:40:56+00:00 | retrieval_finished | candidate_run_id=8 question_id=71 status=success chunks=5
+2026-06-05T02:41:04+00:00 | generation_failed | candidate_run_id=8 question_id=71 error=Remote candidate returned HTTP 400: Request exceeds model context window for 'google/gemma-2-2b-it'. Your prompt is 5133 tokens plus max_tokens=4000 = 9133 total, which exceeds the model's context size of 12192 tokens by -3059 tokens. Reduce max_tokens to at most 7059 or shorten the prompt. (Platform records context_length as 8192; up
+2026-06-05T02:41:04+00:00 | answer_persisted | candidate_answer_id=6 question_id=71 status=failed
+2026-06-05T02:41:04+00:00 | snapshot_persisted | candidate_answer_id=6 question_id=71 count=5
+2026-06-05T02:41:04+00:00 | run_finished | candidate_run_id=8 selected=1 processed=1 success=0 failed=1 skipped=0
+2026-06-05T02:41:04+00:00 | START Closing PostgreSQL connection
+2026-06-05T02:41:04+00:00 | DONE Closing PostgreSQL connection | elapsed_ms=0
+2026-06-05T02:41:04+00:00 | audit_log_finished

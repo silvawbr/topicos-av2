@@ -1,0 +1,16 @@
+2026-06-05T02:59:12+00:00 | audit_log_started | path=logs/candidate-rag-20260605-025912.log
+2026-06-05T02:59:12+00:00 | START Loading configuration
+2026-06-05T02:59:12+00:00 | DONE Loading configuration | elapsed_ms=0
+2026-06-05T02:59:12+00:00 | execution_summary | Dataset: J1 | Candidate model: google/gemma-2-2b-it | Provider: remote_http | Batch size: 1 | Question id: - | Question range: 71-71
+2026-06-05T02:59:12+00:00 | START Connecting to local PostgreSQL | DATABASE_URL=<redacted>
+2026-06-05T02:59:12+00:00 | FAIL Connecting to local PostgreSQL | DATABASE_URL=<redacted> error=connection to server at "localhost" (::1), port 5432 failed: Operation not permitted
+	Is the server running on that host and accepting TCP/IP connections?
+connection to server at "localhost" (127.0.0.1), port 5432 failed: Operation not permitted
+	Is the server running on that host and accepting TCP/IP connections?
+ elapsed_ms=33
+2026-06-05T02:59:12+00:00 | audit_log_failed | error=connection to server at "localhost" (::1), port 5432 failed: Operation not permitted
+	Is the server running on that host and accepting TCP/IP connections?
+connection to server at "localhost" (127.0.0.1), port 5432 failed: Operation not permitted
+	Is the server running on that host and accepting TCP/IP connections?
+
+2026-06-05T02:59:12+00:00 | audit_log_finished

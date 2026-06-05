@@ -1,0 +1,20 @@
+2026-06-05T02:36:32+00:00 | audit_log_started | path=logs/candidate-rag-20260605-023632.log
+2026-06-05T02:36:32+00:00 | START Loading configuration
+2026-06-05T02:36:32+00:00 | DONE Loading configuration | elapsed_ms=0
+2026-06-05T02:36:32+00:00 | execution_summary | Dataset: J1 | Candidate model: google/gemma-2-2b-it | Provider: remote_http | Batch size: 1 | Question id: - | Question range: 71-71
+2026-06-05T02:36:32+00:00 | START Connecting to local PostgreSQL | DATABASE_URL=<redacted>
+2026-06-05T02:36:32+00:00 | DONE Connecting to local PostgreSQL | DATABASE_URL=<redacted> elapsed_ms=64
+2026-06-05T02:36:32+00:00 | START Ensuring candidate metadata schema
+2026-06-05T02:36:32+00:00 | DONE Ensuring candidate metadata schema | elapsed_ms=29
+2026-06-05T02:36:32+00:00 | run_started | candidate_run_id=6 dataset=J1 model=google/gemma-2-2b-it provider=remote_http retrieval_run_id=1 prompt_id=1
+2026-06-05T02:36:32+00:00 | START Selecting candidate questions for J1 | dataset=J1 batch_size=1 question_id=None start=71 end=71
+2026-06-05T02:36:32+00:00 | DONE Selecting candidate questions for J1 | dataset=J1 batch_size=1 question_id=None start=71 end=71 elapsed_ms=3
+2026-06-05T02:36:32+00:00 | question_started | candidate_run_id=6 question_id=71 sequence=71 dataset=J1
+2026-06-05T02:36:34+00:00 | retrieval_finished | candidate_run_id=6 question_id=71 status=success chunks=5
+2026-06-05T02:36:35+00:00 | generation_failed | candidate_run_id=6 question_id=71 error=Remote candidate returned HTTP 403: You don't have access to this gated model. Visit https://featherless.ai/models/google/gemma-2-2b-it to request access on HuggingFace.
+2026-06-05T02:36:35+00:00 | answer_persisted | candidate_answer_id=4 question_id=71 status=failed
+2026-06-05T02:36:35+00:00 | snapshot_persisted | candidate_answer_id=4 question_id=71 count=5
+2026-06-05T02:36:35+00:00 | run_finished | candidate_run_id=6 selected=1 processed=1 success=0 failed=1 skipped=0
+2026-06-05T02:36:35+00:00 | START Closing PostgreSQL connection
+2026-06-05T02:36:35+00:00 | DONE Closing PostgreSQL connection | elapsed_ms=0
+2026-06-05T02:36:35+00:00 | audit_log_finished

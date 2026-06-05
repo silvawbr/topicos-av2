@@ -1,0 +1,15 @@
+2026-06-05T02:59:22+00:00 | audit_log_started | path=logs/candidate-rag-20260605-025922.log
+2026-06-05T02:59:22+00:00 | START Loading configuration
+2026-06-05T02:59:22+00:00 | DONE Loading configuration | elapsed_ms=0
+2026-06-05T02:59:22+00:00 | execution_summary | Dataset: J1 | Candidate model: google/gemma-2-2b-it | Provider: remote_http | Batch size: 1 | Question id: - | Question range: 71-71
+2026-06-05T02:59:22+00:00 | START Connecting to local PostgreSQL | DATABASE_URL=<redacted>
+2026-06-05T02:59:22+00:00 | DONE Connecting to local PostgreSQL | DATABASE_URL=<redacted> elapsed_ms=79
+2026-06-05T02:59:22+00:00 | START Ensuring candidate metadata schema
+2026-06-05T02:59:22+00:00 | DONE Ensuring candidate metadata schema | elapsed_ms=47
+2026-06-05T02:59:22+00:00 | START Selecting candidate questions for J1 | dataset=J1 batch_size=1 question_id=None start=71 end=71
+2026-06-05T02:59:22+00:00 | DONE Selecting candidate questions for J1 | dataset=J1 batch_size=1 question_id=None start=71 end=71 elapsed_ms=2
+2026-06-05T02:59:22+00:00 | candidate_runtime_config | Candidate runtime config: |   model: google/gemma-2-2b-it |   technical provider: remote_http |   av3 provider: featherless |   base_url: https://api.featherless.ai/v1 |   api_key: <set> |   temperature: 0.0 |   top_p: 1.0 |   max_tokens: 1024 |   save_raw_response: false
+2026-06-05T02:59:22+00:00 | dry_run_finished | no candidate_run rows created and no remote candidate calls made
+2026-06-05T02:59:22+00:00 | START Closing PostgreSQL connection
+2026-06-05T02:59:22+00:00 | DONE Closing PostgreSQL connection | elapsed_ms=0
+2026-06-05T02:59:22+00:00 | audit_log_finished
